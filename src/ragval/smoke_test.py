@@ -14,18 +14,16 @@ from __future__ import annotations
 import argparse
 import os
 
-from ragval.metrics import AnswerCorrectness, AnswerRelevance, Faithfulness
 from rank_bm25 import BM25Okapi
 from rich.console import Console
 from rich.table import Table
 
 from ragval.datasets import load_hotpotqa, load_toy_dataset, toy_corpus
-from ragval.judges import GeminiJudge, MockJudge, GroqJudge
+from ragval.judges import GeminiJudge, GroqJudge, MockJudge
 from ragval.metrics import AnswerCorrectness, AnswerRelevance, Faithfulness
 from ragval.retrieval import per_question_bm25_rag
 from ragval.runner import run_eval
 from ragval.types import RagOutput
-
 
 
 def build_toy_rag(corpus: list[str], generator_judge):
@@ -56,7 +54,6 @@ def main():
     args = parser.parse_args()
 
     console = Console()
-    
 
     if os.environ.get("GROQ_API_KEY"):
         console.print("[green]Using GroqJudge (Llama 3.3 70B)[/green]")
@@ -83,7 +80,6 @@ def main():
     #     console.print("[yellow]No API keys — using MockJudge (results will be fake)[/yellow]")
     #     judge = MockJudge()
     #     generator = MockJudge(response_text="A mocked answer.")
-        
 
     # if os.environ.get("GEMINI_API_KEY"):
     #     console.print("[green]Using GeminiJudge[/green]")

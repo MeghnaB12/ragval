@@ -94,6 +94,7 @@ def load_hotpotqa(path: Path | str | None = None) -> list[EvalSample]:
         ),
     ]
 
+
 def load_toy_dataset() -> list[EvalSample]:
     """Tiny in-memory dataset for smoke tests. Not part of the framework's
     public API — used only by the optional --toy mode of smoke_test.
@@ -103,7 +104,9 @@ def load_toy_dataset() -> list[EvalSample]:
             id="toy-1",
             question="Who wrote the novel '1984'?",
             ground_truth_answer="George Orwell",
-            ground_truth_contexts=["George Orwell wrote 1984, a dystopian novel published in 1949."],
+            ground_truth_contexts=[
+                "George Orwell wrote 1984, a dystopian novel published in 1949."
+            ],
         ),
         EvalSample(
             id="toy-2",

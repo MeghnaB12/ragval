@@ -13,12 +13,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-import threading
-import time
 import diskcache
 from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -92,14 +92,14 @@ class Judge(ABC):
         return self._call_api(prompt)
 
     @abstractmethod
-    def _call_api(self, prompt: str) -> JudgeResponse:
-        ...
+    def _call_api(self, prompt: str) -> JudgeResponse: ...
 
     def _compute_cost(self, in_tokens: int, out_tokens: int) -> float:
         return (
             in_tokens / 1_000_000 * self.cost_per_1m_input
             + out_tokens / 1_000_000 * self.cost_per_1m_output
         )
+
 
 class GeminiJudge(Judge):
     """Google Gemini Flash judge. Free tier: 1500 RPD, 15 RPM (as of mid-2026).
@@ -110,7 +110,7 @@ class GeminiJudge(Judge):
     model_id = "gemini-2.5-flash"
     cost_per_1m_input = 0.30
     cost_per_1m_output = 2.50
-    min_seconds_between_calls = 13.0 
+    min_seconds_between_calls = 13.0
 
     def __init__(self, cache_dir: Path | str | None = None, temperature: float = 0.0):
         super().__init__(cache_dir=cache_dir, temperature=temperature)
@@ -140,6 +140,7 @@ class GeminiJudge(Judge):
             output_tokens=out_toks,
             cost_usd=self._compute_cost(in_toks, out_toks),
         )
+
 
 class GroqJudge(Judge):
     """Groq Llama 3.3 70B judge. Free tier with generous rate limits.
