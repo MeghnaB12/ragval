@@ -1,7 +1,15 @@
-"""ragval — rigorous RAG evaluation."""
+"""ragval — rigorous RAG evaluation with confidence intervals,
+significance testing, and judge calibration."""
 
-__version__ = "0.0.1"
+from ragval.types import EvalSample, MetricResult, RagOutput, RunResult, SampleResult
 
-from ragval.types import EvalSample, MetricResult, RagOutput, RunResult
+__version__ = "0.1.0"
 
-__all__ = ["EvalSample", "RagOutput", "MetricResult", "RunResult"]
+__all__ = [
+    "EvalSample",
+    "MetricResult",
+    "RagOutput",
+    "RunResult",
+    "SampleResult",
+    "__version__",
+]

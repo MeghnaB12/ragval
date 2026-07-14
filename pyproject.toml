@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ragval"
-version = "0.0.1"
+version = "0.1.0"
 description = "Rigorous RAG evaluation with confidence intervals, significance testing, and judge calibration."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Your Name", email = "you@example.com" }]
+authors = [{ name = "Meghna Biswal", email = "meghna.biswal01@gmail.com" }]
 keywords = ["rag", "evaluation", "llm", "benchmarking"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.5",
     "diskcache>=5.6",
-    "google-generativeai>=0.8",
+    "google-genai>=1.0",
     "groq>=0.11",
     "rank-bm25>=0.2.2",
     "datasets>=3.0",
@@ -48,9 +48,9 @@ all = ["ragval[dashboard,dev]"]
 ragval = "ragval.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/yourname/ragval"
-Repository = "https://github.com/yourname/ragval"
-Issues = "https://github.com/yourname/ragval/issues"
+Homepage = "https://github.com/MeghnaB12/ragval"
+Repository = "https://github.com/MeghnaB12/ragval"
+Issues = "https://github.com/MeghnaB12/ragval/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ragval"]
@@ -62,6 +62,10 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 ignore = ["E501"]  # line too long handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+"src/ragval/cli.py" = ["B008"]        # typer.Option/Argument in defaults is the typer idiom
+"scripts/run_benchmark.py" = ["E402"] # imports follow the sys.path bootstrap
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

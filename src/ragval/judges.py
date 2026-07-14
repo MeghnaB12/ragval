@@ -46,10 +46,14 @@ class Judge(ABC):
     cost_per_1m_output: float = 0.0
     min_seconds_between_calls: float = 0.0  # rate limit; 0 = no throttling
 
+    use_cache: bool = True  # MockJudge disables this — see its docstring
+
     def __init__(self, cache_dir: Path | str | None = None, temperature: float = 0.0):
-        cache_path = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
-        cache_path.mkdir(parents=True, exist_ok=True)
-        self.cache = diskcache.Cache(str(cache_path))
+        self.cache = None
+        if self.use_cache:
+            cache_path = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
+            cache_path.mkdir(parents=True, exist_ok=True)
+            self.cache = diskcache.Cache(str(cache_path))
         self.temperature = temperature
         self._last_call_time = 0.0
         self._call_lock = threading.Lock()
@@ -64,11 +68,12 @@ class Judge(ABC):
     def call(self, prompt: str) -> JudgeResponse:
         """Call the judge with caching and rate limiting."""
         key = self._cache_key(prompt)
-        cached = self.cache.get(key)
-        if cached is not None:
-            cached["cached"] = True
-            cached["cost_usd"] = 0.0
-            return JudgeResponse(**cached)
+        if self.cache is not None:
+            cached = self.cache.get(key)
+            if cached is not None:
+                cached["cached"] = True
+                cached["cost_usd"] = 0.0
+                return JudgeResponse(**cached)
 
         # Rate limit: only applies to actual API calls, not cache hits
         if self.min_seconds_between_calls > 0:
@@ -80,7 +85,8 @@ class Judge(ABC):
                 self._last_call_time = time.time()
 
         response = self._call_api_with_retry(prompt)
-        self.cache.set(key, response.model_dump())
+        if self.cache is not None:
+            self.cache.set(key, response.model_dump())
         return response
 
     @retry(
@@ -181,9 +187,15 @@ class GroqJudge(Judge):
 
 
 class MockJudge(Judge):
-    """Deterministic judge for tests. Returns a canned response."""
+    """Deterministic judge for tests. Returns a canned response.
+
+    Caching is DISABLED for mocks: all MockJudge instances share model_id
+    "mock", so a shared disk cache would leak canned responses between
+    tests configured with different response_text.
+    """
 
     model_id = "mock"
+    use_cache = False
     cost_per_1m_input = 0.0
     cost_per_1m_output = 0.0
 

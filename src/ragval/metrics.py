@@ -240,9 +240,228 @@ Respond ONLY with valid JSON in this exact format:
         )
 
 
+class ContextPrecision(Metric):
+    """What fraction of retrieved contexts are actually relevant to the question?
+
+    Judge-based, per-context: the judge labels each retrieved context as
+    relevant (contains information needed to answer) or not. The score is
+    the fraction relevant. One judge call per output, batched into a single
+    prompt to keep costs sane.
+    """
+
+    name = "context_precision"
+
+    PROMPT = """You are an expert evaluator judging retrieval quality.
+
+QUESTION: {question}
+
+GROUND TRUTH ANSWER: {ground_truth}
+
+RETRIEVED CONTEXTS:
+{contexts}
+
+For EACH context, decide whether it is RELEVANT: does it contain information \
+needed to answer the question (fully or partially)? A context about the right \
+entity but the wrong fact is NOT relevant.
+
+Respond ONLY with valid JSON in this exact format:
+{{"relevant": [<true/false for context 1>, <true/false for context 2>, ...], \
+"reasoning": "<one sentence>"}}
+The "relevant" list must have exactly {n} entries."""
+
+    def score(self, sample: EvalSample, output: RagOutput, judge: Judge) -> MetricResult:
+        contexts = output.retrieved_contexts
+        if not contexts:
+            return MetricResult(
+                metric_name=self.name,
+                score=0.0,
+                raw_score=0.0,
+                reasoning="No contexts retrieved.",
+                judge_model=judge.model_id,
+            )
+        contexts_str = "\n\n".join(f"[{i + 1}] {c}" for i, c in enumerate(contexts))
+        prompt = self.PROMPT.format(
+            question=sample.question,
+            ground_truth=sample.ground_truth_answer,
+            contexts=contexts_str,
+            n=len(contexts),
+        )
+        response = judge.call(prompt)
+        flags, reasoning = _parse_json_bool_list(response.text, "relevant")
+        if flags is None or len(flags) != len(contexts):
+            return MetricResult(
+                metric_name=self.name,
+                score=0.0,
+                raw_score=None,
+                reasoning=f"PARSE_FAILURE: {response.text[:200]}",
+                judge_model=response.model,
+                cost_usd=response.cost_usd,
+            )
+        precision = sum(flags) / len(flags)
+        return MetricResult(
+            metric_name=self.name,
+            score=precision,
+            raw_score=precision,
+            reasoning=reasoning,
+            judge_model=response.model,
+            cost_usd=response.cost_usd,
+            metadata={"relevant_flags": flags},
+        )
+
+
+class ContextRecall(Metric):
+    """Do the retrieved contexts contain everything needed to produce the
+    ground truth answer?
+
+    Judge-based: the judge decomposes the ground truth answer into its
+    required facts and checks whether each is attributable to the retrieved
+    contexts. Score = fraction of required facts covered.
+    """
+
+    name = "context_recall"
+
+    PROMPT = """You are an expert evaluator judging retrieval completeness.
+
+QUESTION: {question}
+
+GROUND TRUTH ANSWER: {ground_truth}
+
+RETRIEVED CONTEXTS:
+{contexts}
+
+Step 1: Identify the fact(s) required to state the ground truth answer \
+(often 1-2 facts; multi-hop questions require 2+).
+Step 2: For each required fact, decide whether it is present in the \
+retrieved contexts.
+
+Respond ONLY with valid JSON in this exact format:
+{{"covered": [<true/false for fact 1>, ...], "reasoning": "<the facts and which are covered>"}}"""
+
+    def score(self, sample: EvalSample, output: RagOutput, judge: Judge) -> MetricResult:
+        contexts = output.retrieved_contexts
+        contexts_str = (
+            "\n\n".join(f"[{i + 1}] {c}" for i, c in enumerate(contexts)) if contexts else "(none)"
+        )
+        prompt = self.PROMPT.format(
+            question=sample.question,
+            ground_truth=sample.ground_truth_answer,
+            contexts=contexts_str,
+        )
+        response = judge.call(prompt)
+        flags, reasoning = _parse_json_bool_list(response.text, "covered")
+        if flags is None or not flags:
+            return MetricResult(
+                metric_name=self.name,
+                score=0.0,
+                raw_score=None,
+                reasoning=f"PARSE_FAILURE: {response.text[:200]}",
+                judge_model=response.model,
+                cost_usd=response.cost_usd,
+            )
+        recall = sum(flags) / len(flags)
+        return MetricResult(
+            metric_name=self.name,
+            score=recall,
+            raw_score=recall,
+            reasoning=reasoning,
+            judge_model=response.model,
+            cost_usd=response.cost_usd,
+            metadata={"covered_flags": flags},
+        )
+
+
+def _matches_gold_title(context: str, gold_titles: set[str]) -> bool:
+    """Retrieved contexts are formatted 'Title: text'. A context matches a
+    gold title if it starts with that title followed by a colon.
+
+    Prefix matching (rather than splitting on ':') is deliberate: Wikipedia
+    titles can themselves contain colons ("Star Trek: First Contact").
+    """
+    return any(context.startswith(f"{t}:") for t in gold_titles)
+
+
+class RetrievalRecall(Metric):
+    """Deterministic (judge-free) retrieval recall for datasets with gold
+    supporting documents, like HotpotQA.
+
+    Compares the *titles* of retrieved contexts against the sample's known
+    supporting titles (`metadata.supporting_titles`, falling back to
+    `ground_truth_contexts`). Free, exact, and reproducible — use this
+    alongside the judge-based ContextRecall to sanity-check the judge.
+    """
+
+    name = "retrieval_recall"
+
+    def score(self, sample: EvalSample, output: RagOutput, judge: Judge) -> MetricResult:
+        gold = set(sample.metadata.get("supporting_titles") or sample.ground_truth_contexts)
+        if not gold:
+            return MetricResult(
+                metric_name=self.name,
+                score=0.0,
+                raw_score=None,
+                reasoning="No gold supporting titles on sample.",
+            )
+        hit = sum(1 for t in gold if any(c.startswith(f"{t}:") for c in output.retrieved_contexts))
+        recall = hit / len(gold)
+        return MetricResult(
+            metric_name=self.name,
+            score=recall,
+            raw_score=recall,
+            reasoning=f"{hit}/{len(gold)} gold titles retrieved.",
+            judge_model="deterministic",
+        )
+
+
+class RetrievalPrecision(Metric):
+    """Deterministic retrieval precision against gold supporting titles."""
+
+    name = "retrieval_precision"
+
+    def score(self, sample: EvalSample, output: RagOutput, judge: Judge) -> MetricResult:
+        gold = set(sample.metadata.get("supporting_titles") or sample.ground_truth_contexts)
+        if not output.retrieved_contexts:
+            return MetricResult(
+                metric_name=self.name,
+                score=0.0,
+                raw_score=0.0,
+                reasoning="No contexts retrieved.",
+                judge_model="deterministic",
+            )
+        hit = sum(1 for c in output.retrieved_contexts if _matches_gold_title(c, gold))
+        precision = hit / len(output.retrieved_contexts)
+        return MetricResult(
+            metric_name=self.name,
+            score=precision,
+            raw_score=precision,
+            reasoning=f"{hit}/{len(output.retrieved_contexts)} retrieved contexts are gold.",
+            judge_model="deterministic",
+        )
+
+
+def _parse_json_bool_list(text: str, key: str) -> tuple[list[bool] | None, str]:
+    """Extract {key: [bools], reasoning} from judge text. Tolerant of fences."""
+    cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if not match:
+        return None, text
+    try:
+        data = json.loads(match.group(0))
+        flags = data.get(key)
+        reasoning = str(data.get("reasoning", ""))
+        if isinstance(flags, list) and all(isinstance(f, bool) for f in flags):
+            return flags, reasoning
+    except json.JSONDecodeError:
+        pass
+    return None, text
+
+
 # Registry — used by CLI and runner to look up metrics by name.
 METRIC_REGISTRY: dict[str, type[Metric]] = {
     Faithfulness.name: Faithfulness,
     AnswerRelevance.name: AnswerRelevance,
     AnswerCorrectness.name: AnswerCorrectness,
+    ContextPrecision.name: ContextPrecision,
+    ContextRecall.name: ContextRecall,
+    RetrievalRecall.name: RetrievalRecall,
+    RetrievalPrecision.name: RetrievalPrecision,
 }

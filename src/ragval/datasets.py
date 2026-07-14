@@ -52,48 +52,6 @@ def load_hotpotqa(path: Path | str | None = None) -> list[EvalSample]:
         raise FileNotFoundError(f"{p} not found. Run `python scripts/prepare_hotpotqa.py` first.")
     return load_jsonl(p)
 
-    """Tiny in-memory dataset for smoke tests. 5 questions, all answerable from
-    a small Wikipedia-style corpus.
-    """
-    return [
-        EvalSample(
-            id="toy-1",
-            question="Who wrote the novel '1984'?",
-            ground_truth_answer="George Orwell",
-            ground_truth_contexts=[
-                "George Orwell wrote 1984, a dystopian novel published in 1949."
-            ],
-        ),
-        EvalSample(
-            id="toy-2",
-            question="What is the capital of Australia?",
-            ground_truth_answer="Canberra",
-            ground_truth_contexts=["Canberra is the capital city of Australia."],
-        ),
-        EvalSample(
-            id="toy-3",
-            question="What year did the Berlin Wall fall?",
-            ground_truth_answer="1989",
-            ground_truth_contexts=["The Berlin Wall fell on November 9, 1989."],
-        ),
-        EvalSample(
-            id="toy-4",
-            question="What does DNA stand for?",
-            ground_truth_answer="Deoxyribonucleic acid",
-            ground_truth_contexts=[
-                "DNA stands for deoxyribonucleic acid, the molecule that carries genetic information."
-            ],
-        ),
-        EvalSample(
-            id="toy-5",
-            question="Who painted the Mona Lisa?",
-            ground_truth_answer="Leonardo da Vinci",
-            ground_truth_contexts=[
-                "The Mona Lisa was painted by Leonardo da Vinci between 1503 and 1519."
-            ],
-        ),
-    ]
-
 
 def load_toy_dataset() -> list[EvalSample]:
     """Tiny in-memory dataset for smoke tests. Not part of the framework's
