@@ -1,5 +1,7 @@
 # ragval
 
+[![ci](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml/badge.svg)](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml)
+
 > Rigorous RAG evaluation with confidence intervals, significance testing, and judge calibration.
 
 ## Why ragval
@@ -25,7 +27,10 @@ Most RAG evaluation tools tell you that config A scored 0.74 and config B scored
 - [x] CLI: `runs`, `report`, `compare`, `calibrate`, `smoke`
 - [x] Streamlit dashboard
 - [x] HotpotQA-500 benchmark harness: 8 configs, resumable
-- [ ] Full benchmark results + write-up (in progress)
+- [x] Preflight quota/token estimator + provider quota checker
+- [ ] **Benchmark results — not yet run.** No numbers are published in this README yet; every figure shown is a placeholder.
+- [ ] Judge calibration labels (the framework is built; the ~20 human labels are not written yet)
+- [ ] Write-up
 
 ## Install (dev)
 
@@ -55,7 +60,7 @@ result = run_eval(my_rag, dataset, [Faithfulness(), AnswerRelevance(), AnswerCor
 save_run(result)
 
 for summary in summarize_run(result):
-    print(summary)  # faithfulness: 0.812 [95% CI 0.771–0.849] (n=500)
+    print(summary)  # e.g. "faithfulness: 0.NNN [95% CI 0.NNN–0.NNN] (n=150)"
 ```
 
 ## The statistics that make it "rigorous"
@@ -64,12 +69,17 @@ for summary in summarize_run(result):
 from ragval.runs import load_run
 from ragval.stats import compare_runs
 
-a = load_run("benchmarks/results/oracle-hotpotqa500.jsonl")
-b = load_run("benchmarks/results/bm25_k3-hotpotqa500.jsonl")
+a = load_run("benchmarks/results/oracle-hotpotqa150.jsonl")
+b = load_run("benchmarks/results/bm25_k3-hotpotqa150.jsonl")
 
 print(compare_runs(a, b, "answer_correctness"))
-# answer_correctness: oracle=0.802 vs bm25_k3=0.641 | diff=+0.161
-# [95% CI +0.118–+0.204] p_boot=0.0001 p_perm=0.0001 → SIGNIFICANT
+```
+
+The output format (values here are placeholders — real results are pending, see Status):
+
+```
+answer_correctness: oracle=0.NNN vs bm25_k3=0.NNN | diff=+0.NNN
+[95% CI +0.NNN–+0.NNN] p_boot=0.NNNN p_perm=0.NNNN → SIGNIFICANT
 ```
 
 Comparisons are **paired by sample ID**. Question difficulty varies enormously (HotpotQA "easy" vs "hard"), and pairing removes that variance — an unpaired test on the same data can be 5–10× less powerful.
@@ -94,7 +104,7 @@ Three tabs: per-run metric means with CI error bars, run-vs-run comparison with 
 
 ## The HotpotQA-500 benchmark
 
-8 RAG configurations over one axis of retrieval quality and one of prompting, on a stratified 500-question sample of HotpotQA (distractor setting):
+8 RAG configurations over one axis of retrieval quality and one of prompting, on a stratified sample of HotpotQA (distractor setting). The prepared dataset holds 500 questions; **benchmarks run on the first 150 by default**, because that is what a power analysis justifies — see Sample size below.
 
 | config | retrieval | prompt |
 |---|---|---|
@@ -114,11 +124,33 @@ The grid is designed to answer four questions with p-values instead of vibes: do
 python scripts/prepare_hotpotqa.py
 
 export GROQ_API_KEY=...
-python scripts/run_benchmark.py --n 50 --configs bm25_k3 oracle   # dry run
-python scripts/run_benchmark.py                                    # everything
+
+# 1. What are my provider's actual limits?
+python scripts/check_quota.py
+
+# 2. What will this run cost? (no API calls)
+python scripts/run_benchmark.py --estimate-only --n 150 \
+    --configs closed_book bm25_k3 oracle
+
+# 3. Run it.
+python scripts/run_benchmark.py --n 150 --configs closed_book bm25_k3 oracle
 ```
 
-The benchmark **resumes by default** — every completed sample is checkpointed to `benchmarks/results/partial/`, and judge calls are disk-cached, so interruptions (inevitable on free-tier rate limits) cost nothing.
+The benchmark **resumes by default** — every completed sample is checkpointed to `benchmarks/results/partial/`, and judge calls are disk-cached, so interruptions cost nothing. On a free tier the binding constraint is usually *tokens per day*, not requests per minute; `run_benchmark.py` detects daily-quota exhaustion, checkpoints, and exits cleanly so you can resume tomorrow.
+
+By default the answer **generator** runs on a high-quota cheap model (`llama-3.1-8b-instant`) while the scarce strong-model budget is spent on **judging**, where model quality actually moves the numbers. A weaker generator is defensible here — arguably preferable, since it leans on retrieval rather than memorization, which is what the benchmark measures.
+
+### Sample size
+
+n=500 is not free. A power analysis — run through ragval's own paired bootstrap — gives:
+
+| n | power to detect d=0.10 | d=0.15 |
+|---|---|---|
+| 100 | 0.67 | 0.94 |
+| **150** | **0.81** | **0.98** |
+| 500 | 0.99 | 1.00 |
+
+n=150 clears the conventional 0.80 threshold for a 10-point difference. n=500 only adds the ability to resolve ~5-point gaps, which sit inside judge noise. The framework should size its own samples rather than default to a round number.
 
 ## Design
 
