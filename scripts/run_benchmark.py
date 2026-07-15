@@ -1,29 +1,40 @@
-"""Run the full HotpotQA-500 benchmark: 8 configs x 500 questions.
+"""Run the HotpotQA benchmark across RAG configurations.
 
 Usage:
     export GROQ_API_KEY=...
-    python scripts/run_benchmark.py                       # all 8 configs
-    python scripts/run_benchmark.py --configs bm25_k3 oracle
-    python scripts/run_benchmark.py --n 50                # subset for a dry run
-    python scripts/run_benchmark.py --judge gemini        # requires GEMINI_API_KEY
+
+    # Always start here — costs nothing, calls no API:
+    python scripts/run_benchmark.py --estimate-only --n 150 \
+        --configs closed_book bm25_k3 oracle
+
+    # Free-tier plan: cheap generator, 70B judge, 2 judge metrics
+    python scripts/run_benchmark.py --n 150 --configs closed_book bm25_k3 oracle
+
+    # Paid tier: everything, fast
+    python scripts/run_benchmark.py --n 500 --rpm 300 --yes \
+        --generator-model llama-3.3-70b-versatile \
+        --metrics faithfulness answer_relevance answer_correctness
 
 Design notes:
 
 - RESUME BY DEFAULT. Every completed sample is appended to
-  benchmarks/results/partial/<config>.jsonl immediately. Re-running the
-  script skips samples already done. Free-tier rate limits mean the full
-  run takes hours; it WILL be interrupted, and that must be cheap.
-- Judge calls are also disk-cached (see ragval.judges), so even deleting a
-  partial file and re-running mostly hits cache.
-- Generation and judging use separate cache-friendly prompts; the Groq
-  generator is throttled to stay under the free-tier RPM.
+  benchmarks/results/partial/<config>.jsonl immediately. Re-running skips
+  samples already done. Free-tier daily caps guarantee interruption, so
+  interruption must be cheap.
+- Judge calls are also disk-cached, so even deleting a partial file and
+  re-running mostly hits cache.
+- GENERATOR and JUDGE are separate models. The generator (the RAG system
+  under test) defaults to the high-quota llama-3.1-8b-instant; the scarce
+  llama-3.3-70b budget is reserved for judging, where model quality
+  actually moves the numbers. A weaker generator is scientifically fine —
+  arguably better, since it leans on retrieval instead of memorization,
+  which is exactly what the benchmark is trying to measure.
+- On a DAILY quota error the run checkpoints and exits cleanly (status 2)
+  rather than burning retry backoff against a cap that won't clear for hours.
 
-Budget estimate (Groq free tier, ~24 RPM):
-  Per sample: 1 generation + 3 judge calls (faithfulness, answer_relevance,
-  answer_correctness) + 2 deterministic metrics (free) = 4 API calls.
-  8 configs x 500 samples x 4 calls = 16,000 calls ≈ 11 hours of throttled
-  runtime end-to-end. Run configs in separate sessions, or use --n 100
-  first and extend.
+IMPORTANT: partial files are keyed by config name only — not by judge, model,
+or dataset size. If you change models or metrics, delete
+benchmarks/results/partial/ first or stale samples will silently merge in.
 """
 
 from __future__ import annotations
@@ -41,35 +52,32 @@ from tqdm import tqdm
 
 from ragval.configs import CONFIG_NAMES, build_rag_for_sample
 from ragval.datasets import load_hotpotqa
-from ragval.judges import GeminiJudge, GroqJudge, Judge
-from ragval.metrics import (
-    AnswerCorrectness,
-    AnswerRelevance,
-    Faithfulness,
-    RetrievalPrecision,
-    RetrievalRecall,
-)
+from ragval.judges import GeminiJudge, GroqJudge, Judge, _DailyQuotaError
+from ragval.metrics import METRIC_REGISTRY, Faithfulness
 from ragval.runs import save_run
 from ragval.types import RagOutput, RunResult, SampleResult
 
 PARTIAL_DIR = ROOT / "benchmarks" / "results" / "partial"
 
+DEFAULT_METRICS = ["faithfulness", "answer_correctness"]
+FREE_METRICS = ["retrieval_recall", "retrieval_precision"]  # deterministic, no API cost
 
 # Rough output-token sizes, used only by the preflight estimate.
 _OUT_GEN, _OUT_JUDGE, _OUT_COT = 30, 60, 200
-_JUDGE_CALLS_PER_SAMPLE = 3  # faithfulness, answer_relevance, answer_correctness
-_CALLS_PER_SAMPLE = _JUDGE_CALLS_PER_SAMPLE + 1  # + 1 generation
 
 
-def estimate_cost(config: str, dataset) -> tuple[int, float]:
+def build_metrics(names: list[str]) -> list:
+    """Judge-based metrics from `names`, plus the free deterministic ones."""
+    return [METRIC_REGISTRY[n]() for n in list(names) + FREE_METRICS]
+
+
+def estimate_config(config: str, dataset, n_judge_metrics: int) -> tuple[int, float]:
     """Preflight estimate: (n_requests, n_tokens) for one config.
 
-    Approximates tokens as chars/4. Exists because free-tier quotas are
-    usually bound by tokens-per-day, not requests-per-minute — and finding
+    Approximates tokens as chars/4. This exists because free-tier quotas
+    usually bind on tokens-per-day, not requests-per-minute — and finding
     that out at hour six of an overnight run is an expensive way to learn it.
     """
-    from ragval.metrics import Faithfulness
-
     total_tokens = 0.0
     is_cot = config.endswith("_cot")
     for sample in dataset:
@@ -88,18 +96,19 @@ def estimate_cost(config: str, dataset) -> tuple[int, float]:
         judge_prompt = Faithfulness.PROMPT.format(
             question=sample.question, contexts=ctx or "(none)", answer=output.answer
         )
-        # All three judge prompts are of a similar shape; scale the measured one.
-        total_tokens += _JUDGE_CALLS_PER_SAMPLE * (len(judge_prompt) / 4 + _OUT_JUDGE)
-    return len(dataset) * _CALLS_PER_SAMPLE, total_tokens
+        # Judge prompts have a similar shape; scale the measured one. This is a
+        # slight OVER-estimate, which is the safe direction for quota planning.
+        total_tokens += n_judge_metrics * (len(judge_prompt) / 4 + _OUT_JUDGE)
+    return len(dataset) * (n_judge_metrics + 1), total_tokens
 
 
-def print_preflight(configs: list[str], dataset, rpm: float) -> None:
-    """Print the request/token/time budget before spending hours on a run."""
+def print_preflight(configs: list[str], dataset, rpm: float, n_judge_metrics: int) -> None:
+    """Print the request/token budget before spending hours on a run."""
     print("\n=== Preflight estimate ===")
     print(f"{'config':<14} {'requests':>9} {'tokens':>11}")
-    total_req = total_tok = 0
+    total_req, total_tok = 0, 0.0
     for config in configs:
-        req, tok = estimate_cost(config, dataset)
+        req, tok = estimate_config(config, dataset, n_judge_metrics)
         total_req += req
         total_tok += tok
         print(f"{config:<14} {req:>9,} {tok:>11,.0f}")
@@ -107,23 +116,28 @@ def print_preflight(configs: list[str], dataset, rpm: float) -> None:
     print(f"{'TOTAL':<14} {total_req:>9,} {total_tok:>11,.0f}")
 
     hours = (total_req / rpm) / 60 if rpm > 0 else 0
-    print(f"\nAt {rpm:.0f} RPM: ~{hours:.1f} hours of wall clock.")
+    print(f"\nAt {rpm:.0f} RPM: ~{hours:.1f} hours of wall clock (ignoring daily caps).")
     print(
-        "Groq FREE tier (llama-3.3-70b): 30 RPM, 1,000 req/day, 100K tokens/day.\n"
-        f"  -> this run needs {total_req / 1000:.1f} days on the request cap "
-        f"and {total_tok / 100_000:.1f} days on the TOKEN cap."
+        "\nCheck YOUR real limits with: python scripts/check_quota.py\n"
+        "Published free-tier figures for llama-3.3-70b are ~30 RPM / 1,000 req-day /\n"
+        "100K tokens-day, but they vary by account and change over time."
+    )
+    print(
+        f"  -> against those figures: {total_req / 1000:.1f} days on requests, "
+        f"{total_tok / 100_000:.1f} days on TOKENS."
     )
     if total_tok > 100_000 or total_req > 1000:
         print(
-            "  !! This run does NOT fit in one free-tier day. Either upgrade to the\n"
-            "     Groq Developer tier (no daily cap; this run costs roughly "
-            f"${total_tok / 1e6 * 0.59:.2f}),\n"
-            "     or reduce --n / --configs."
+            "  !! Does NOT fit in one free-tier day. Options:\n"
+            "     - run it anyway: it checkpoints and resumes, just spread over days\n"
+            "     - lower --n (see the power analysis: n=150 detects a 0.10 gap at 0.81 power)\n"
+            "     - drop a judge metric via --metrics\n"
+            f"     - or pay: Developer tier has no daily cap; this run is ~${total_tok / 1e6 * 0.59:.2f}"
         )
     print()
 
 
-def make_judge(name: str, min_gap: float = 2.5) -> Judge:
+def make_judge(name: str, min_gap: float) -> Judge:
     if name == "groq":
         return GroqJudge(min_seconds_between_calls=min_gap)
     if name == "gemini":
@@ -156,15 +170,10 @@ def append_partial(config: str, sr: SampleResult) -> None:
         f.write(sr.model_dump_json() + "\n")
 
 
-def run_config(config: str, dataset, generator_judge: Judge, judge: Judge) -> RunResult:
-    metrics = [
-        Faithfulness(),
-        AnswerRelevance(),
-        AnswerCorrectness(),
-        RetrievalRecall(),
-        RetrievalPrecision(),
-    ]
-
+def run_config(
+    config: str, dataset, generator_judge: Judge, judge: Judge, metric_names: list[str]
+) -> RunResult:
+    metrics = build_metrics(metric_names)
     done = load_partial(config)
     todo = [s for s in dataset if s.id not in done]
     print(f"[{config}] {len(done)} done, {len(todo)} to go")
@@ -176,18 +185,19 @@ def run_config(config: str, dataset, generator_judge: Judge, judge: Judge) -> Ru
         rag = build_rag_for_sample(config, sample, generate)
         try:
             output = rag(sample.question)
+        except _DailyQuotaError:
+            raise  # checkpoint and stop; never record a fabricated answer
         except Exception as e:
             output = RagOutput(answer=f"[RAG_ERROR: {e}]", retrieved_contexts=[])
 
-        metric_results = {}
-        for metric in metrics:
-            metric_results[metric.name] = metric.score(sample, output, judge)
+        # A sample is written only once every metric succeeds. A half-scored
+        # sample would look complete on resume and silently corrupt the run.
+        metric_results = {m.name: m.score(sample, output, judge) for m in metrics}
 
         sr = SampleResult(sample_id=sample.id, rag_output=output, metrics=metric_results)
         append_partial(config, sr)
         done[sample.id] = sr
 
-    # Assemble in dataset order
     samples = [done[s.id] for s in dataset if s.id in done]
     total_cost = sum(m.cost_usd for sr in samples for m in sr.metrics.values())
     return RunResult(
@@ -197,29 +207,38 @@ def run_config(config: str, dataset, generator_judge: Judge, judge: Judge) -> Ru
         timestamp=datetime.now(timezone.utc),
         samples=samples,
         total_cost_usd=total_cost,
-        metadata={"judge": judge.model_id, "generator": "llama-3.3-70b-versatile"},
+        metadata={"judge": judge.model_id, "generator": generator_judge.model_id},
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run the HotpotQA benchmark.")
     parser.add_argument("--configs", nargs="+", default=CONFIG_NAMES, choices=CONFIG_NAMES)
     parser.add_argument("--n", type=int, default=None, help="Limit to first N samples")
     parser.add_argument("--judge", default="groq", choices=["groq", "gemini"])
     parser.add_argument(
+        "--generator-model",
+        default="llama-3.1-8b-instant",
+        help="Model that ANSWERS questions (the RAG system under test). Defaults to "
+        "the high-quota 8B model so the scarce 70B budget goes to judging.",
+    )
+    parser.add_argument(
+        "--metrics",
+        nargs="+",
+        default=DEFAULT_METRICS,
+        choices=sorted(set(METRIC_REGISTRY) - set(FREE_METRICS)),
+        help=f"Judge-based metrics (default: {DEFAULT_METRICS}). The deterministic "
+        f"metrics {FREE_METRICS} are always included and cost nothing.",
+    )
+    parser.add_argument(
         "--rpm",
         type=float,
         default=24.0,
-        help="Target requests/min ACROSS generator+judge combined. Default 24 is "
-        "safe for Groq's 30 RPM free tier. On the Developer tier (~1000 RPM) "
-        "pass something like --rpm 300 to finish far faster.",
+        help="Target requests/min per model. Default 24 is safe under a 30 RPM free "
+        "tier. On a paid tier (~1000 RPM) try --rpm 300.",
     )
-    parser.add_argument(
-        "--estimate-only",
-        action="store_true",
-        help="Print the request/token budget and exit without calling any API.",
-    )
-    parser.add_argument("--yes", action="store_true", help="Skip the pre-run confirmation prompt.")
+    parser.add_argument("--estimate-only", action="store_true", help="Print budget and exit.")
+    parser.add_argument("--yes", action="store_true", help="Skip the confirmation prompt.")
     args = parser.parse_args()
 
     dataset = load_hotpotqa()
@@ -227,22 +246,31 @@ def main():
         dataset = dataset[: args.n]
     print(f"Dataset: {len(dataset)} samples. Configs: {args.configs}. Judge: {args.judge}")
 
-    print_preflight(args.configs, dataset, args.rpm)
+    print_preflight(args.configs, dataset, args.rpm, len(args.metrics))
     if args.estimate_only:
         return
     if not args.yes and input("Proceed? [y/N] ").strip().lower() != "y":
         print("Aborted.")
         return
 
-    # The generator and the judge may be the same model; the rate limiter is
-    # shared per model_id, so the throttle below applies to their COMBINED rate.
     gap = 60.0 / args.rpm if args.rpm > 0 else 0.0
-    generator = GroqJudge(min_seconds_between_calls=gap)
+    generator = GroqJudge(model=args.generator_model, min_seconds_between_calls=gap)
     judge = make_judge(args.judge, gap)
+    print(f"Generator: {generator.model_id} | Judge: {judge.model_id}")
+    print(f"Metrics: {args.metrics} (+ free: {FREE_METRICS})")
 
     summary_rows = []
     for config in args.configs:
-        result = run_config(config, dataset, generator, judge)
+        try:
+            result = run_config(config, dataset, generator, judge, args.metrics)
+        except _DailyQuotaError as e:
+            print(
+                f"\n\n!! DAILY QUOTA EXHAUSTED while running '{config}'.\n"
+                f"   {e}\n"
+                "   Completed samples are checkpointed in benchmarks/results/partial/.\n"
+                "   Re-run the same command tomorrow and it resumes from here.\n"
+            )
+            raise SystemExit(2) from e
         path = save_run(result, ROOT / "benchmarks" / "results")
         print(f"[{config}] saved {path}")
         row = {"config": config}
@@ -251,7 +279,7 @@ def main():
             row[m] = sum(scores) / len(scores) if scores else float("nan")
         summary_rows.append(row)
 
-    print("\n=== Benchmark summary (means; run `ragval compare` for CIs and p-values) ===")
+    print("\n=== Benchmark summary (means; use `ragval compare` for CIs and p-values) ===")
     print(json.dumps(summary_rows, indent=2))
 
 

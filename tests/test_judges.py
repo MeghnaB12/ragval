@@ -82,3 +82,36 @@ def test_min_seconds_override():
     """Paid tiers need a smaller throttle than the free-tier class default."""
     j = MockJudge(min_seconds_between_calls=0.0)
     assert j.min_seconds_between_calls == 0.0
+
+
+def test_groq_model_override_changes_pricing_and_limiter_key():
+    """The benchmark runs the generator on a cheap model and the judge on a
+    strong one; model must be overridable per instance."""
+    import os
+
+    os.environ.setdefault("GROQ_API_KEY", "test-key-not-used")
+    from ragval.judges import GroqJudge
+
+    big = GroqJudge(model="llama-3.3-70b-versatile", min_seconds_between_calls=0.0)
+    small = GroqJudge(model="llama-3.1-8b-instant", min_seconds_between_calls=0.0)
+    assert big.model_id != small.model_id
+    assert small.cost_per_1m_input < big.cost_per_1m_input
+    # Separate models must NOT share a rate limiter (their quotas are separate).
+    assert big._limiter is not small._limiter
+
+
+def test_daily_quota_detection_distinguishes_from_per_minute():
+    """Per-minute 429s should retry; per-day 429s must not."""
+    from ragval.judges import _is_daily_quota_error
+
+    class FakeApiError(Exception):
+        status_code = 429
+
+    assert _is_daily_quota_error(FakeApiError("Rate limit reached: 1000 requests per day"))
+    assert _is_daily_quota_error(FakeApiError("limit of 100000 tokens per day exceeded"))
+    assert not _is_daily_quota_error(FakeApiError("Rate limit reached: 30 requests per minute"))
+
+    class ServerError(Exception):
+        status_code = 500
+
+    assert not _is_daily_quota_error(ServerError("per day"))

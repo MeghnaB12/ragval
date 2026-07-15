@@ -21,7 +21,7 @@ from typing import Any
 
 import diskcache
 from pydantic import BaseModel
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ragval" / "judge"
 
@@ -60,6 +60,29 @@ class _SharedRateLimiter:
             if wait > 0:
                 time.sleep(wait)
             self._last_call = time.time()
+
+
+class _DailyQuotaError(RuntimeError):
+    """Base class for daily-quota exhaustion. Retrying these is pointless."""
+
+
+def _is_daily_quota_error(exc: Exception) -> bool:
+    """Distinguish a DAILY cap from a transient per-minute 429.
+
+    Providers signal both with HTTP 429; only the message distinguishes them.
+    Retrying a per-minute limit is correct. Retrying a per-day limit just
+    burns backoff for hours and then fails anyway.
+    """
+    if getattr(exc, "status_code", None) != 429:
+        return False
+    msg = str(exc).lower()
+    return (
+        "per day" in msg
+        or "requests per day" in msg
+        or "tokens per day" in msg
+        or "rpd" in msg
+        or "tpd" in msg
+    )
 
 
 class JudgeResponse(BaseModel):
@@ -138,6 +161,7 @@ class Judge(ABC):
     @retry(
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=2, min=4, max=60),
+        retry=retry_if_not_exception_type(_DailyQuotaError),
         reraise=True,
     )
     def _call_api_with_retry(self, prompt: str) -> JudgeResponse:
@@ -194,10 +218,24 @@ class GeminiJudge(Judge):
         )
 
 
-class GroqJudge(Judge):
-    """Groq Llama 3.3 70B judge. Free tier with generous rate limits.
+class GroqQuotaExhaustedError(_DailyQuotaError):
+    """Raised when a Groq DAILY quota (RPD/TPD) is exhausted.
 
-    Set GROQ_API_KEY env var. Useful as a second judge for calibration.
+    Distinct from a per-minute 429, which is transient and worth retrying.
+    A daily cap will not clear for hours, so retrying is pointless — callers
+    should checkpoint and exit so the run can resume tomorrow.
+    """
+
+
+class GroqJudge(Judge):
+    """Groq judge. Defaults to Llama 3.3 70B; pass `model` for another.
+
+    Set GROQ_API_KEY env var.
+
+    On the free tier the binding constraint is usually TOKENS PER DAY, not
+    requests per minute. A common pattern is to run the answer *generator* on
+    a high-quota model (llama-3.1-8b-instant) and reserve the 70B budget for
+    *judging*, where model quality actually changes the numbers.
     """
 
     model_id = "llama-3.3-70b-versatile"
@@ -205,21 +243,53 @@ class GroqJudge(Judge):
     cost_per_1m_output = 0.79
     min_seconds_between_calls = 2.5  # ~24 RPM, safely under 30 RPM Groq free-tier limit
 
-    def __init__(self, cache_dir: Path | str | None = None, temperature: float = 0.0):
-        super().__init__(cache_dir=cache_dir, temperature=temperature)
+    # Per-1M pricing for models we support explicitly; used for cost reporting.
+    _PRICING = {
+        "llama-3.3-70b-versatile": (0.59, 0.79),
+        "llama-3.1-8b-instant": (0.05, 0.08),
+    }
+
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+        temperature: float = 0.0,
+        min_seconds_between_calls: float | None = None,
+        model: str | None = None,
+    ):
+        if model:
+            # Instance-level override; must be set before super().__init__ so the
+            # shared rate limiter is keyed on the right model.
+            self.model_id = model
+            if model in self._PRICING:
+                self.cost_per_1m_input, self.cost_per_1m_output = self._PRICING[model]
+        super().__init__(
+            cache_dir=cache_dir,
+            temperature=temperature,
+            min_seconds_between_calls=min_seconds_between_calls,
+        )
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:
             raise ValueError("Set GROQ_API_KEY (free at https://console.groq.com)")
         from groq import Groq
 
         self._client = Groq(api_key=api_key)
+        self.last_rate_limit_headers: dict[str, str] = {}
 
     def _call_api(self, prompt: str) -> JudgeResponse:
-        response = self._client.chat.completions.create(
-            model=self.model_id,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=self.temperature,
-        )
+        try:
+            raw = self._client.chat.completions.with_raw_response.create(
+                model=self.model_id,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+            self.last_rate_limit_headers = {
+                k: v for k, v in raw.headers.items() if k.startswith("x-ratelimit")
+            }
+            response = raw.parse()
+        except Exception as e:
+            if _is_daily_quota_error(e):
+                raise GroqQuotaExhaustedError(str(e)) from e
+            raise
         text = response.choices[0].message.content or ""
         in_toks = response.usage.prompt_tokens if response.usage else 0
         out_toks = response.usage.completion_tokens if response.usage else 0
