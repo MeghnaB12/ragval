@@ -26,6 +26,42 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 DEFAULT_CACHE_DIR = Path.home() / ".cache" / "ragval" / "judge"
 
 
+class _SharedRateLimiter:
+    """A rate limiter shared by every Judge instance using the same model.
+
+    This must be shared, not per-instance. Providers enforce rate limits per
+    model at the ORGANIZATION level, but a benchmark run typically builds two
+    judges on the same model — one as the answer generator, one as the scorer.
+    With per-instance throttles the two interleave and the COMBINED request
+    rate is roughly 4/3 of the configured rate, which quietly exceeds the cap
+    and earns a stream of 429s. Keying the limiter on model_id fixes that.
+    """
+
+    _instances: dict[str, _SharedRateLimiter] = {}
+    _registry_lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_call = 0.0
+
+    @classmethod
+    def for_model(cls, model_id: str) -> _SharedRateLimiter:
+        with cls._registry_lock:
+            if model_id not in cls._instances:
+                cls._instances[model_id] = cls()
+            return cls._instances[model_id]
+
+    def acquire(self, min_gap: float) -> None:
+        """Block until at least `min_gap` seconds have passed since the last call."""
+        if min_gap <= 0:
+            return
+        with self._lock:
+            wait = min_gap - (time.time() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.time()
+
+
 class JudgeResponse(BaseModel):
     """What every judge returns for one call."""
 
@@ -48,15 +84,30 @@ class Judge(ABC):
 
     use_cache: bool = True  # MockJudge disables this — see its docstring
 
-    def __init__(self, cache_dir: Path | str | None = None, temperature: float = 0.0):
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+        temperature: float = 0.0,
+        min_seconds_between_calls: float | None = None,
+    ):
+        """
+        Args:
+            cache_dir: where to store the judge-call disk cache.
+            temperature: sampling temperature (part of the cache key).
+            min_seconds_between_calls: override the class default throttle.
+                Free tiers need the conservative class default; on a paid tier
+                (Groq Developer allows ~1000 RPM) pass a much smaller value —
+                e.g. 0.1 — or 0 to disable throttling entirely.
+        """
         self.cache = None
         if self.use_cache:
             cache_path = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
             cache_path.mkdir(parents=True, exist_ok=True)
             self.cache = diskcache.Cache(str(cache_path))
         self.temperature = temperature
-        self._last_call_time = 0.0
-        self._call_lock = threading.Lock()
+        if min_seconds_between_calls is not None:
+            self.min_seconds_between_calls = min_seconds_between_calls
+        self._limiter = _SharedRateLimiter.for_model(self.model_id)
 
     def _cache_key(self, prompt: str) -> str:
         payload = json.dumps(
@@ -75,14 +126,9 @@ class Judge(ABC):
                 cached["cost_usd"] = 0.0
                 return JudgeResponse(**cached)
 
-        # Rate limit: only applies to actual API calls, not cache hits
-        if self.min_seconds_between_calls > 0:
-            with self._call_lock:
-                elapsed = time.time() - self._last_call_time
-                wait = self.min_seconds_between_calls - elapsed
-                if wait > 0:
-                    time.sleep(wait)
-                self._last_call_time = time.time()
+        # Rate limit: only applies to actual API calls, not cache hits.
+        # Shared across all judges on this model — see _SharedRateLimiter.
+        self._limiter.acquire(self.min_seconds_between_calls)
 
         response = self._call_api_with_retry(prompt)
         if self.cache is not None:

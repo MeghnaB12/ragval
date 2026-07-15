@@ -51,3 +51,34 @@ def test_mock_judge_does_not_cache():
     j1.call("same prompt")
     r = j2.call("same prompt")
     assert '"score": 1' in r.text
+
+
+def test_rate_limiter_shared_across_instances_of_same_model():
+    """Regression: generator + judge on the same model must share a throttle,
+    or their combined request rate exceeds the provider's per-model cap."""
+    import ragval.judges as judges_mod
+
+    a = judges_mod._SharedRateLimiter.for_model("shared-test-model")
+    b = judges_mod._SharedRateLimiter.for_model("shared-test-model")
+    c = judges_mod._SharedRateLimiter.for_model("other-model")
+    assert a is b
+    assert a is not c
+
+
+def test_rate_limiter_enforces_gap():
+    import time
+
+    import ragval.judges as judges_mod
+
+    limiter = judges_mod._SharedRateLimiter()
+    start = time.time()
+    limiter.acquire(0.0)  # first call, no wait
+    limiter.acquire(0.15)
+    limiter.acquire(0.15)
+    assert time.time() - start >= 0.15
+
+
+def test_min_seconds_override():
+    """Paid tiers need a smaller throttle than the free-tier class default."""
+    j = MockJudge(min_seconds_between_calls=0.0)
+    assert j.min_seconds_between_calls == 0.0
