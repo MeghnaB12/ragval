@@ -52,7 +52,7 @@ from tqdm import tqdm
 
 from ragval.configs import CONFIG_NAMES, build_rag_for_sample
 from ragval.datasets import load_hotpotqa
-from ragval.judges import GeminiJudge, GroqJudge, Judge, _DailyQuotaError
+from ragval.judges import ClaudeJudge, GeminiJudge, GroqJudge, Judge, _DailyQuotaError
 from ragval.metrics import METRIC_REGISTRY, Faithfulness
 from ragval.runs import save_run
 from ragval.types import RagOutput, RunResult, SampleResult
@@ -71,14 +71,15 @@ def build_metrics(names: list[str]) -> list:
     return [METRIC_REGISTRY[n]() for n in list(names) + FREE_METRICS]
 
 
-def estimate_config(config: str, dataset, n_judge_metrics: int) -> tuple[int, float]:
-    """Preflight estimate: (n_requests, n_tokens) for one config.
+def estimate_config(config: str, dataset, n_judge_metrics: int) -> tuple[int, float, float]:
+    """Preflight estimate: (n_requests, generator_tokens, judge_tokens).
 
-    Approximates tokens as chars/4. This exists because free-tier quotas
-    usually bind on tokens-per-day, not requests-per-minute — and finding
-    that out at hour six of an overnight run is an expensive way to learn it.
+    Generator and judge tokens are reported separately because they may run on
+    different providers with different quotas — e.g. generation on Groq's free
+    tier, judging on paid Claude. Approximates tokens as chars/4.
     """
-    total_tokens = 0.0
+    gen_tokens = 0.0
+    judge_tokens = 0.0
     is_cot = config.endswith("_cot")
     for sample in dataset:
         captured: list[str] = []
@@ -91,57 +92,89 @@ def estimate_config(config: str, dataset, n_judge_metrics: int) -> tuple[int, fl
             output = build_rag_for_sample(config, sample, capture)(sample.question)
         except Exception:
             continue
-        total_tokens += len(captured[-1]) / 4 + (_OUT_COT if is_cot else _OUT_GEN)
+        gen_tokens += len(captured[-1]) / 4 + (_OUT_COT if is_cot else _OUT_GEN)
         ctx = "\n\n".join(f"[{i + 1}] {c}" for i, c in enumerate(output.retrieved_contexts))
         judge_prompt = Faithfulness.PROMPT.format(
             question=sample.question, contexts=ctx or "(none)", answer=output.answer
         )
-        # Judge prompts have a similar shape; scale the measured one. This is a
-        # slight OVER-estimate, which is the safe direction for quota planning.
-        total_tokens += n_judge_metrics * (len(judge_prompt) / 4 + _OUT_JUDGE)
-    return len(dataset) * (n_judge_metrics + 1), total_tokens
+        judge_tokens += n_judge_metrics * (len(judge_prompt) / 4 + _OUT_JUDGE)
+    return len(dataset) * (n_judge_metrics + 1), gen_tokens, judge_tokens
 
 
-def print_preflight(configs: list[str], dataset, rpm: float, n_judge_metrics: int) -> None:
-    """Print the request/token budget before spending hours on a run."""
+# Claude judge pricing per 1M tokens, for the cost estimate.
+_CLAUDE_PRICING = {"claude-haiku-4-5": (1.0, 5.0), "claude-sonnet-4-6": (3.0, 15.0)}
+# Free-tier Groq daily token caps observed on the generator model.
+_GROQ_GEN_TPD = {"llama-3.1-8b-instant": 500_000, "llama-3.3-70b-versatile": 100_000}
+
+
+def print_preflight(
+    configs: list[str],
+    dataset,
+    rpm: float,
+    n_judge_metrics: int,
+    judge: str = "groq",
+    claude_model: str = "claude-haiku-4-5",
+    generator_model: str = "llama-3.1-8b-instant",
+) -> None:
+    """Print the request/token budget before spending hours (or dollars) on a run."""
     print("\n=== Preflight estimate ===")
-    print(f"{'config':<14} {'requests':>9} {'tokens':>11}")
-    total_req, total_tok = 0, 0.0
+    print(f"{'config':<14} {'requests':>9} {'gen tok':>11} {'judge tok':>11}")
+    total_req, total_gen, total_judge = 0, 0.0, 0.0
     for config in configs:
-        req, tok = estimate_config(config, dataset, n_judge_metrics)
+        req, gen, jud = estimate_config(config, dataset, n_judge_metrics)
         total_req += req
-        total_tok += tok
-        print(f"{config:<14} {req:>9,} {tok:>11,.0f}")
-    print("-" * 36)
-    print(f"{'TOTAL':<14} {total_req:>9,} {total_tok:>11,.0f}")
+        total_gen += gen
+        total_judge += jud
+        print(f"{config:<14} {req:>9,} {gen:>11,.0f} {jud:>11,.0f}")
+    print("-" * 48)
+    print(f"{'TOTAL':<14} {total_req:>9,} {total_gen:>11,.0f} {total_judge:>11,.0f}")
 
-    hours = (total_req / rpm) / 60 if rpm > 0 else 0
-    print(f"\nAt {rpm:.0f} RPM: ~{hours:.1f} hours of wall clock (ignoring daily caps).")
+    # Generator: free Groq, bound by tokens-per-day.
+    gen_cap = _GROQ_GEN_TPD.get(generator_model, 500_000)
+    print(f"\nGENERATOR ({generator_model}, free Groq tier):")
     print(
-        "\nCheck YOUR real limits with: python scripts/check_quota.py\n"
-        "Published free-tier figures for llama-3.3-70b are ~30 RPM / 1,000 req-day /\n"
-        "100K tokens-day, but they vary by account and change over time."
+        f"  {total_gen:,.0f} tokens / {gen_cap:,} per day = "
+        f"~{total_gen / gen_cap:.1f} day(s) of generation."
     )
-    print(
-        f"  -> against those figures: {total_req / 1000:.1f} days on requests, "
-        f"{total_tok / 100_000:.1f} days on TOKENS."
-    )
-    if total_tok > 100_000 or total_req > 1000:
+    if total_gen > gen_cap:
         print(
-            "  !! Does NOT fit in one free-tier day. Options:\n"
-            "     - run it anyway: it checkpoints and resumes, just spread over days\n"
-            "     - lower --n (see the power analysis: n=150 detects a 0.10 gap at 0.81 power)\n"
-            "     - drop a judge metric via --metrics\n"
-            f"     - or pay: Developer tier has no daily cap; this run is ~${total_tok / 1e6 * 0.59:.2f}"
+            "  Generation spans multiple days on the free cap. The run checkpoints\n"
+            "  and resumes, so this is unattended: one command per day until done."
         )
+
+    # Judge: depends on choice.
+    print(f"\nJUDGE ({judge}):")
+    if judge == "claude":
+        cin, cout = _CLAUDE_PRICING.get(claude_model, (1.0, 5.0))
+        # Rough in/out split: judge prompts are input-heavy, ~60-token outputs.
+        out_tok = n_judge_metrics * len(dataset) * len(configs) * _OUT_JUDGE / len(configs)
+        out_tok = total_judge * 0.12  # ~12% output is a safe over-estimate
+        in_tok = total_judge - out_tok
+        cost = in_tok / 1e6 * cin + out_tok / 1e6 * cout
+        print(
+            f"  {claude_model}: ~{total_judge:,.0f} tokens -> ~${cost:.2f}. "
+            "No daily cap; runs in one sitting."
+        )
+    elif judge == "groq":
+        print(
+            f"  {total_judge:,.0f} tokens / 100,000 per day (llama-3.3-70b free) = "
+            f"~{total_judge / 100_000:.0f} DAYS. Groq Developer tier is required to go\n"
+            "  faster, but is currently unavailable. Consider --judge claude."
+        )
+    else:
+        print(f"  {total_judge:,.0f} judge tokens.")
     print()
 
 
-def make_judge(name: str, min_gap: float) -> Judge:
+def make_judge(name: str, min_gap: float, claude_model: str = "claude-haiku-4-5") -> Judge:
     if name == "groq":
         return GroqJudge(min_seconds_between_calls=min_gap)
     if name == "gemini":
         return GeminiJudge()
+    if name == "claude":
+        # Claude is paid with generous limits; it does not need the free-tier
+        # Groq throttle. A small gap still avoids hammering the endpoint.
+        return ClaudeJudge(model=claude_model, min_seconds_between_calls=0.1)
     raise ValueError(f"Unknown judge: {name}")
 
 
@@ -215,7 +248,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the HotpotQA benchmark.")
     parser.add_argument("--configs", nargs="+", default=CONFIG_NAMES, choices=CONFIG_NAMES)
     parser.add_argument("--n", type=int, default=None, help="Limit to first N samples")
-    parser.add_argument("--judge", default="groq", choices=["groq", "gemini"])
+    parser.add_argument("--judge", default="groq", choices=["groq", "gemini", "claude"])
+    parser.add_argument(
+        "--claude-model",
+        default="claude-haiku-4-5",
+        help="Claude model when --judge claude (claude-haiku-4-5 or claude-sonnet-4-6).",
+    )
     parser.add_argument(
         "--generator-model",
         default="llama-3.1-8b-instant",
@@ -246,7 +284,15 @@ def main() -> None:
         dataset = dataset[: args.n]
     print(f"Dataset: {len(dataset)} samples. Configs: {args.configs}. Judge: {args.judge}")
 
-    print_preflight(args.configs, dataset, args.rpm, len(args.metrics))
+    print_preflight(
+        args.configs,
+        dataset,
+        args.rpm,
+        len(args.metrics),
+        args.judge,
+        args.claude_model,
+        args.generator_model,
+    )
     if args.estimate_only:
         return
     if not args.yes and input("Proceed? [y/N] ").strip().lower() != "y":
@@ -255,7 +301,7 @@ def main() -> None:
 
     gap = 60.0 / args.rpm if args.rpm > 0 else 0.0
     generator = GroqJudge(model=args.generator_model, min_seconds_between_calls=gap)
-    judge = make_judge(args.judge, gap)
+    judge = make_judge(args.judge, gap, args.claude_model)
     print(f"Generator: {generator.model_id} | Judge: {judge.model_id}")
     print(f"Metrics: {args.metrics} (+ free: {FREE_METRICS})")
 
