@@ -43,6 +43,7 @@ class _SharedRateLimiter:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._last_call = 0.0
+        self._token_window: list[tuple[float, int]] = []
 
     @classmethod
     def for_model(cls, model_id: str) -> _SharedRateLimiter:
@@ -51,15 +52,45 @@ class _SharedRateLimiter:
                 cls._instances[model_id] = cls()
             return cls._instances[model_id]
 
-    def acquire(self, min_gap: float) -> None:
-        """Block until at least `min_gap` seconds have passed since the last call."""
-        if min_gap <= 0:
-            return
+    def acquire(self, min_gap: float, tokens: int = 0, tpm_limit: int = 0) -> None:
+        """Block until it is safe to make another call.
+
+        Enforces two limits jointly:
+          - a minimum gap between calls (the RPM throttle), and
+          - a tokens-per-minute ceiling (the TPM throttle), using a rolling
+            60-second window of recently-spent tokens.
+
+        The TPM guard matters because request rate alone is blind to prompt
+        size: a config that stuffs 2000-token contexts into every judge call
+        can blow a 250K TPM cap at an RPM that looks perfectly safe. Passing
+        an estimated `tokens` and the provider `tpm_limit` lets the run
+        self-pace across configs of wildly different prompt sizes.
+        """
         with self._lock:
-            wait = min_gap - (time.time() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.time()
+            now = time.time()
+            if min_gap > 0:
+                wait = min_gap - (now - self._last_call)
+                if wait > 0:
+                    time.sleep(wait)
+                    now = time.time()
+
+            if tpm_limit > 0 and tokens > 0:
+                cutoff = now - 60.0
+                self._token_window = [(t, n) for (t, n) in self._token_window if t > cutoff]
+                spent = sum(n for _, n in self._token_window)
+                # Keep an 85% safety margin under the hard cap.
+                if spent + tokens > tpm_limit * 0.85:
+                    oldest = self._token_window[0][0] if self._token_window else now
+                    sleep_for = max(0.0, 60.0 - (now - oldest))
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                        now = time.time()
+                        self._token_window = [
+                            (t, n) for (t, n) in self._token_window if t > now - 60.0
+                        ]
+                self._token_window.append((now, tokens))
+
+            self._last_call = now
 
 
 class _DailyQuotaError(RuntimeError):
@@ -131,6 +162,8 @@ class Judge(ABC):
         if min_seconds_between_calls is not None:
             self.min_seconds_between_calls = min_seconds_between_calls
         self._limiter = _SharedRateLimiter.for_model(self.model_id)
+        # Optional TPM guard, set by callers that know the provider ceiling.
+        self.tpm_limit: int = 0
 
     def _cache_key(self, prompt: str) -> str:
         payload = json.dumps(
@@ -151,7 +184,9 @@ class Judge(ABC):
 
         # Rate limit: only applies to actual API calls, not cache hits.
         # Shared across all judges on this model — see _SharedRateLimiter.
-        self._limiter.acquire(self.min_seconds_between_calls)
+        # Token estimate (chars/4 + output headroom) feeds the TPM guard.
+        est_tokens = len(prompt) // 4 + 256
+        self._limiter.acquire(self.min_seconds_between_calls, est_tokens, self.tpm_limit)
 
         response = self._call_api_with_retry(prompt)
         if self.cache is not None:
@@ -209,6 +244,75 @@ class GeminiJudge(Judge):
         usage = getattr(result, "usage_metadata", None)
         in_toks = getattr(usage, "prompt_token_count", 0) if usage else 0
         out_toks = getattr(usage, "candidates_token_count", 0) if usage else 0
+        return JudgeResponse(
+            text=text,
+            model=self.model_id,
+            input_tokens=in_toks,
+            output_tokens=out_toks,
+            cost_usd=self._compute_cost(in_toks, out_toks),
+        )
+
+
+class ClaudeJudge(Judge):
+    """Anthropic Claude judge.
+
+    Primarily a REFERENCE judge for calibration: run the cheap Groq judge over
+    the whole benchmark, then check its agreement against Claude on a ~20-example
+    labeled subset. Claude being a different model family from the Llama system
+    under test removes the self-preference bias a same-family judge can have.
+
+    Defaults to Haiku 4.5 (cheap, strong enough for scoring). Pass
+    model="claude-sonnet-4-6" for the strongest reference. Set ANTHROPIC_API_KEY.
+
+    Pricing (per 1M tokens, as of mid-2026): Haiku 4.5 $1/$5, Sonnet 4.6 $3/$15.
+    A 20-example calibration pass is well under $0.05 either way.
+    """
+
+    model_id = "claude-haiku-4-5"
+    cost_per_1m_input = 1.00
+    cost_per_1m_output = 5.00
+    min_seconds_between_calls = 0.0  # paid tier from the start; no free-tier throttle
+
+    _PRICING = {
+        "claude-haiku-4-5": (1.00, 5.00),
+        "claude-sonnet-4-6": (3.00, 15.00),
+    }
+
+    def __init__(
+        self,
+        cache_dir: Path | str | None = None,
+        temperature: float = 0.0,
+        min_seconds_between_calls: float | None = None,
+        model: str | None = None,
+        max_tokens: int = 1024,
+    ):
+        if model:
+            self.model_id = model
+            if model in self._PRICING:
+                self.cost_per_1m_input, self.cost_per_1m_output = self._PRICING[model]
+        self.max_tokens = max_tokens
+        super().__init__(
+            cache_dir=cache_dir,
+            temperature=temperature,
+            min_seconds_between_calls=min_seconds_between_calls,
+        )
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            raise ValueError("Set ANTHROPIC_API_KEY (https://console.anthropic.com/)")
+        from anthropic import Anthropic
+
+        self._client = Anthropic(api_key=api_key)
+
+    def _call_api(self, prompt: str) -> JudgeResponse:
+        response = self._client.messages.create(
+            model=self.model_id,
+            max_tokens=self.max_tokens,
+            temperature=self.temperature,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(block.text for block in response.content if block.type == "text")
+        in_toks = response.usage.input_tokens
+        out_toks = response.usage.output_tokens
         return JudgeResponse(
             text=text,
             model=self.model_id,
