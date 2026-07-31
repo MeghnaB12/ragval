@@ -164,3 +164,53 @@ Metrics come in two flavors, deliberately:
 ## License
 
 MIT
+## Results — HotpotQA-500
+
+Judge: `claude-haiku-4-5`. Every cell is mean [95% bootstrap CI], n=500.
+
+| config | answer_correctness | answer_relevance | context_precision | context_recall | faithfulness | retrieval_precision | retrieval_recall |
+|---|---|---|---|---|---|---|---|
+| `bm25_k1` | 0.278 [0.24–0.32] | — | — | — | 0.859 [0.83–0.88] | 0.800 [0.77–0.83] | 0.400 [0.38–0.42] |
+| `bm25_k3` | 0.512 [0.47–0.56] | — | — | — | 0.866 [0.84–0.89] | 0.459 [0.44–0.48] | 0.687 [0.66–0.71] |
+| `bm25_k3_cot` | 0.626 [0.58–0.67] | — | — | — | 0.714 [0.68–0.75] | 0.459 [0.44–0.48] | 0.687 [0.66–0.71] |
+| `bm25_k5` | 0.587 [0.54–0.63] | — | — | — | 0.878 [0.85–0.90] | 0.318 [0.31–0.33] | 0.791 [0.77–0.81] |
+| `closed_book` | 0.344 [0.30–0.38] | — | — | — | 0.262 [0.22–0.30] | 0.000 [0.00–0.00] | 0.000 [0.00–0.00] |
+| `full_context` | 0.724 [0.69–0.76] | — | — | — | 0.891 [0.87–0.92] | 0.202 [0.20–0.21] | 1.000 [1.00–1.00] |
+| `hotpot-bm25-top3-gemini` | 0.575 [0.40–0.74] | 0.625 [0.47–0.78] | 0.319 [0.26–0.39] | 0.800 [0.70–0.90] | 0.942 [0.86–1.00] | — | — |
+| `oracle` | 0.784 [0.75–0.82] | — | — | — | 0.909 [0.89–0.93] | 1.000 [1.00–1.00] | 1.000 [1.00–1.00] |
+| `oracle_cot` | 0.868 [0.84–0.90] | — | — | — | 0.895 [0.87–0.92] | 1.000 [1.00–1.00] | 1.000 [1.00–1.00] |
+
+### Compared against `bm25_k3` (paired, per-sample)
+
+| config | metric | diff | 95% CI | p (boot) | p (perm) | verdict |
+|---|---|---|---|---|---|---|
+| `bm25_k1` | answer_correctness | -0.234 | [-0.280, -0.189] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k1` | faithfulness | -0.007 | [-0.040, +0.027] | 0.6882 | 0.7106 | not significant |
+| `bm25_k1` | retrieval_precision | +0.341 | [+0.308, +0.374] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k1` | retrieval_recall | -0.287 | [-0.312, -0.263] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k3_cot` | answer_correctness | +0.114 | [+0.074, +0.153] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k3_cot` | faithfulness | -0.151 | [-0.194, -0.109] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k3_cot` | retrieval_precision | +0.000 | [+0.000, +0.000] | 1.0000 | 1.0000 | not significant |
+| `bm25_k3_cot` | retrieval_recall | +0.000 | [+0.000, +0.000] | 1.0000 | 1.0000 | not significant |
+| `bm25_k5` | answer_correctness | +0.074 | [+0.041, +0.109] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k5` | faithfulness | +0.013 | [-0.015, +0.042] | 0.3750 | 0.3847 | not significant |
+| `bm25_k5` | retrieval_precision | -0.141 | [-0.153, -0.129] | 0.0001 | 0.0001 | **significant** |
+| `bm25_k5` | retrieval_recall | +0.104 | [+0.086, +0.122] | 0.0001 | 0.0001 | **significant** |
+| `closed_book` | answer_correctness | -0.168 | [-0.220, -0.116] | 0.0001 | 0.0001 | **significant** |
+| `closed_book` | faithfulness | -0.604 | [-0.649, -0.556] | 0.0001 | 0.0001 | **significant** |
+| `closed_book` | retrieval_precision | -0.459 | [-0.475, -0.442] | 0.0001 | 0.0001 | **significant** |
+| `closed_book` | retrieval_recall | -0.687 | [-0.712, -0.662] | 0.0001 | 0.0001 | **significant** |
+| `full_context` | answer_correctness | +0.211 | [+0.166, +0.257] | 0.0001 | 0.0001 | **significant** |
+| `full_context` | faithfulness | +0.026 | [-0.006, +0.059] | 0.1255 | 0.1346 | not significant |
+| `full_context` | retrieval_precision | -0.256 | [-0.273, -0.240] | 0.0001 | 0.0001 | **significant** |
+| `full_context` | retrieval_recall | +0.313 | [+0.288, +0.338] | 0.0001 | 0.0001 | **significant** |
+| `hotpot-bm25-top3-gemini` | answer_correctness | +0.225 | [+0.083, +0.383] | 0.0046 | 0.0100 | **significant** |
+| `hotpot-bm25-top3-gemini` | faithfulness | +0.083 | [-0.017, +0.200] | 0.1594 | 0.2154 | not significant |
+| `oracle` | answer_correctness | +0.272 | [+0.227, +0.317] | 0.0001 | 0.0001 | **significant** |
+| `oracle` | faithfulness | +0.044 | [+0.014, +0.076] | 0.0063 | 0.0090 | **significant** |
+| `oracle` | retrieval_precision | +0.541 | [+0.525, +0.558] | 0.0001 | 0.0001 | **significant** |
+| `oracle` | retrieval_recall | +0.313 | [+0.288, +0.338] | 0.0001 | 0.0001 | **significant** |
+| `oracle_cot` | answer_correctness | +0.355 | [+0.309, +0.400] | 0.0001 | 0.0001 | **significant** |
+| `oracle_cot` | faithfulness | +0.029 | [-0.004, +0.064] | 0.0961 | 0.1045 | not significant |
+| `oracle_cot` | retrieval_precision | +0.541 | [+0.525, +0.558] | 0.0001 | 0.0001 | **significant** |
+| `oracle_cot` | retrieval_recall | +0.313 | [+0.288, +0.338] | 0.0001 | 0.0001 | **significant** |
