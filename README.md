@@ -31,7 +31,7 @@ ragval is built around three principles other RAG eval tools handle loosely:
 - [x] HotpotQA-500 benchmark harness: 8 configs, resumable
 - [x] Preflight quota/token estimator + provider quota checker
 - [x] **Benchmark results: full 8-config run on HotpotQA-500 (see Results below)**
-- [ ] Judge calibration labels (framework built; ~20 human labels pending)
+- [x] Judge calibration: 20 faithfulness labels, cross-validated (Claude vs Llama vs human)
 - [ ] Write-up / blog post
 
 ## Install (dev)
@@ -207,6 +207,17 @@ All differences below are vs `bm25_k3`, paired bootstrap, n=500. Every claim is 
 | oracle_cot | faithfulness | +0.029 | [-0.004, +0.064] | 0.0961 | 0.1045 | not significant |
 
 Full per-metric comparisons (including retrieval precision/recall for every config) are reproducible with `ragval compare <config> bm25_k3`.
+
+### Judge calibration
+
+The faithfulness judge was validated against 20 human-labeled examples (scored blind, before seeing any judge output):
+
+| judge | within-1 agreement | quadratic-weighted κ | Spearman | mean bias |
+|---|---|---|---|---|
+| claude-haiku-4-5 (benchmark judge) | 0.70 | 0.458 | 0.528 | −0.40 |
+| llama-3.3-70b (cross-check) | 0.75 | 0.665 | 0.621 | −0.05 |
+
+Two judges from different model families agree with human labels moderately (κ ≈ 0.5–0.67) and with each other at κ = 0.52. **Both run harsh on faithfulness** — Claude notably so (−0.40), meaning the absolute faithfulness scores above are likely *conservative*. Ranking between configs is preserved (Spearman ≈ 0.5–0.6), so the paired comparisons hold; absolute faithfulness values should be read as a lower bound. This is exactly the caveat ragval is built to surface — an uncalibrated judge would report these numbers with false confidence.
 
 ## License
 
