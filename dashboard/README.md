@@ -4,7 +4,7 @@ A full-stack web app for exploring the ragval benchmark results — a FastAPI
 backend serving the statistical engine, and a React frontend that visualizes
 confidence intervals, paired significance tests, judge reasoning, and calibration.
 
-**Live demo:** _(add your deployed URL here after deploying — see below)_
+**Live demo: [ragval.vercel.app](https://ragval.vercel.app)**
 
 ![Benchmark overview](docs/overview.png)
 
