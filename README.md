@@ -99,12 +99,26 @@ ragval calibrate cal.jsonl --metric faithfulness --judge groq
 
 ## Dashboard
 
+A full-stack web app (FastAPI + React) for exploring the results lives in
+[`dashboard/`](dashboard/). It serves the same statistical engine over a REST
+API and visualizes confidence intervals, paired significance tests, per-sample
+judge reasoning, and judge calibration.
+
+![dashboard overview](dashboard/docs/overview.png)
+
+```bash
+cd dashboard && ./dev.sh          # backend on :8000, frontend on :5173
+```
+
+See [`dashboard/README.md`](dashboard/README.md) for architecture and deploy
+instructions.
+
+There is also a lightweight Streamlit view for quick local inspection:
+
 ```bash
 pip install -e ".[dashboard]"
 streamlit run src/ragval/dashboard.py
 ```
-
-Three tabs: per-run metric means with CI error bars, run-vs-run comparison with p-values, and a sample explorer sorted worst-first with judge reasoning (invaluable for debugging why a config loses).
 
 ## The HotpotQA-500 benchmark
 
