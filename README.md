@@ -4,6 +4,8 @@
 
 > Rigorous RAG evaluation with confidence intervals, significance testing, and judge calibration.
 
+**🔗 Live dashboard: [ragval.vercel.app](https://ragval.vercel.app)**
+
 ## Why ragval
 
 Most RAG evaluation tools tell you that config A scored 0.74 and config B scored 0.71. They don't tell you whether that difference is real or noise.
@@ -32,7 +34,7 @@ ragval is built around three principles other RAG eval tools handle loosely:
 - [x] Preflight quota/token estimator + provider quota checker
 - [x] **Benchmark results: full 8-config run on HotpotQA-500 (see Results below)**
 - [x] Judge calibration: 20 faithfulness labels, cross-validated (Claude vs Llama vs human)
-- [ ] Write-up / blog post
+
 
 ## Install (dev)
 
