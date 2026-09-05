@@ -1,16 +1,58 @@
-# React + Vite
+# ragval dashboard frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Vite frontend for the [`ragval`](../../README.md) benchmark dashboard.
 
-Currently, two official plugins are available:
+**Live app:** https://ragval.vercel.app
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+The UI is intentionally thin: it does not reimplement evaluation or statistical logic. It calls the FastAPI backend, which delegates confidence intervals, paired comparisons, and run loading to the core `ragval` Python package.
 
-## React Compiler
+## Views
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Overview** — benchmark configurations with mean answer-correctness scores and 95% bootstrap confidence intervals.
+- **Compare** — paired per-sample configuration comparisons with bootstrap and sign-flip permutation tests.
+- **Sample explorer** — inspect individual answers and stored judge reasoning, sorted by metric score.
+- **Judge calibration** — view published judge-vs-human agreement statistics and calibration caveats.
 
-## Expanding the Oxlint configuration
+## Local development
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+From `dashboard/frontend`:
+
+```bash
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api` to `http://localhost:8000`. Start the backend separately from `dashboard/backend`:
+
+```bash
+pip install -e ../..
+pip install -r requirements.txt
+uvicorn main:app --reload --port 8000
+```
+
+## Production configuration
+
+The frontend reads the API origin from:
+
+```env
+VITE_API_URL=https://your-ragval-api.example.com
+```
+
+If `VITE_API_URL` is absent, the client falls back to `http://localhost:8000`.
+
+Build the static bundle with:
+
+```bash
+npm run build
+```
+
+## Quality checks
+
+```bash
+npm run lint
+npm run build
+```
+
+## Stack
+
+React 19 · Vite · Oxlint · plain CSS · custom SVG confidence-interval visualizations.
