@@ -1,57 +1,94 @@
 # ragval
 
-[![ci](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml/badge.svg)](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml)
+[![CI](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml/badge.svg)](https://github.com/MeghnaB12/ragval/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-> Rigorous RAG evaluation with confidence intervals, significance testing, and judge calibration.
+> **Statistically rigorous RAG evaluation:** confidence intervals, paired significance tests, judge calibration, reproducible runs, and a full-stack dashboard.
 
-**🔗 Live dashboard: [ragval.vercel.app](https://ragval.vercel.app)**
+**[Live dashboard](https://ragval.vercel.app)** · **[Architecture](docs/ARCHITECTURE.md)** · **[Dashboard docs](dashboard/README.md)**
 
-## Why ragval
+![ragval dashboard overview](dashboard/docs/overview.png)
 
-Most RAG evaluation tools tell you that config A scored 0.74 and config B scored 0.71. They don't tell you whether that difference is real or noise.
+## What ragval solves
 
-ragval is built around three principles other RAG eval tools handle loosely:
+Most RAG evaluations stop at aggregate scores:
 
-**Statistical rigor.** Every metric reports a 95% bootstrap confidence interval. Every comparison reports a paired significance test (bootstrap + sign-flip permutation) on per-sample differences aligned by sample ID. Every benchmark answers the question "is this difference real?"
+```text
+config A = 0.74
+config B = 0.71
+```
 
-**Judge calibration.** Provide ~20 human-labeled examples; ragval reports exact agreement, within-1 agreement, quadratic-weighted kappa, Spearman correlation, and mean bias of your LLM judge against them. If your judge isn't calibrated, your numbers are theater.
+That does not answer the important question: **is A actually better, or is the gap just sampling noise?**
 
-**Reproducibility by default.** Aggressive disk caching of judge calls. Seeded, deterministic statistics. Every run is a single JSONL file. Every result is reproducible from the same inputs.
+ragval treats RAG evaluation as an experiment rather than a leaderboard. It combines per-sample persistence, bootstrap confidence intervals, paired significance tests, and LLM-judge calibration so configuration changes can be compared with uncertainty made explicit.
 
-## Status
+### Why it is different
 
-- [x] Core data types
-- [x] Judge abstraction (Claude, Gemini, Groq, mock) with disk caching, rate limiting, retry
-- [x] Metrics: faithfulness, answer relevance, answer correctness
-- [x] Metrics: context precision, context recall (judge-based)
-- [x] Metrics: retrieval recall, retrieval precision (deterministic, judge-free)
-- [x] Statistical layer: bootstrap CIs, paired bootstrap test, permutation test
-- [x] Judge calibration (agreement, weighted kappa, Spearman, bias)
-- [x] Runner + JSONL run persistence
-- [x] CLI: runs, report, compare, calibrate, smoke
-- [x] Streamlit dashboard
-- [x] HotpotQA-500 benchmark harness: 8 configs, resumable
-- [x] Preflight quota/token estimator + provider quota checker
-- [x] **Benchmark results: full 8-config run on HotpotQA-500 (see Results below)**
-- [x] Judge calibration: 20 faithfulness labels, cross-validated (Claude vs Llama vs human)
+- **Statistical rigor** — every metric can report a 95% bootstrap confidence interval; configuration comparisons use paired bootstrap and sign-flip permutation tests aligned by sample ID.
+- **Judge calibration** — compare an LLM judge against human labels using agreement, weighted kappa, Spearman correlation, and mean bias before trusting its absolute scores.
+- **Reproducibility** — seeded statistics, disk-cached judge calls, persisted JSONL runs, and resumable benchmarks make results repeatable.
+- **Framework-agnostic** — evaluate LangChain, LlamaIndex, custom RAG pipelines, or ordinary Python callables.
+- **Full-stack inspection** — a FastAPI + React dashboard exposes the same statistical engine for interactive comparison, sample inspection, and calibration analysis.
 
+## Architecture
 
-## Install (dev)
+```mermaid
+graph LR
+    A[Dataset] --> B[RAG callable]
+    B --> C[Metric runner]
+    C --> D1[Judge metrics]
+    C --> D2[Deterministic retrieval metrics]
+    D1 --> E[Per-sample run results]
+    D2 --> E
+    E --> F[JSONL persistence]
+    F --> G[Statistical layer]
+    G --> G1[Bootstrap CIs]
+    G --> G2[Paired tests]
+    G --> G3[Judge calibration]
+    G --> H[CLI]
+    G --> I[FastAPI]
+    I --> J[React dashboard]
+```
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the design and data-flow details.
+
+## Dashboard
+
+The web dashboard visualizes benchmark runs, confidence intervals, paired comparisons, per-sample judge reasoning, and judge calibration.
+
+| Compare configurations | Inspect samples | Judge calibration |
+| --- | --- | --- |
+| ![comparison view](dashboard/docs/compare.png) | ![sample view](dashboard/docs/samples.png) | ![calibration view](dashboard/docs/calibration.png) |
+
+Local development:
+
+```bash
+cd dashboard
+./dev.sh
+# FastAPI: http://localhost:8000
+# React:   http://localhost:5173
+```
+
+## Quick start
+
+### Install for development
 
 ```bash
 git clone https://github.com/MeghnaB12/ragval
 cd ragval
 pip install -e ".[dev,dashboard,reference]"
+cp .env.example .env
 ```
 
-API keys are read automatically from a `.env` file in the project root:
+Configure only the provider keys you use. For example:
 
-```
+```env
 GROQ_API_KEY=gsk_...
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-## Quick start
+### Evaluate any RAG callable
 
 ```python
 from ragval import EvalSample, RagOutput
@@ -61,179 +98,196 @@ from ragval.runner import run_eval
 from ragval.runs import save_run
 from ragval.stats import summarize_run
 
+
 def my_rag(question: str) -> RagOutput:
-    # plug in anything: LangChain, LlamaIndex, raw functions, production code
+    # LangChain, LlamaIndex, custom pipeline, or plain Python
     ...
 
-dataset = [EvalSample(id="1", question="...", ground_truth_answer="...")]
-judge = GroqJudge()
-result = run_eval(my_rag, dataset, [Faithfulness(), AnswerRelevance(), AnswerCorrectness()], judge)
+
+dataset = [
+    EvalSample(
+        id="1",
+        question="...",
+        ground_truth_answer="...",
+    )
+]
+
+result = run_eval(
+    my_rag,
+    dataset,
+    [Faithfulness(), AnswerRelevance(), AnswerCorrectness()],
+    GroqJudge(),
+)
+
 save_run(result)
 
 for summary in summarize_run(result):
-    print(summary)  # e.g. "faithfulness: 0.866 [95% CI 0.84-0.89] (n=500)"
+    print(summary)
 ```
 
-## The statistics that make it "rigorous"
+Example output:
+
+```text
+faithfulness: 0.866 [95% CI 0.84-0.89] (n=500)
+```
+
+## Compare configurations statistically
 
 ```python
 from ragval.runs import load_run
 from ragval.stats import compare_runs
 
-a = load_run("benchmarks/results/oracle-hotpotqa500.jsonl")
-b = load_run("benchmarks/results/bm25_k3-hotpotqa500.jsonl")
+baseline = load_run("benchmarks/results/bm25_k3-hotpotqa500.jsonl")
+variant = load_run("benchmarks/results/oracle-hotpotqa500.jsonl")
 
-print(compare_runs(a, b, "answer_correctness"))
-# answer_correctness: oracle=0.784 vs bm25_k3=0.512 | diff=+0.272
-# [95% CI +0.227-+0.317] p_boot=0.0001 p_perm=0.0001 -> SIGNIFICANT
+print(compare_runs(variant, baseline, "answer_correctness"))
 ```
 
-Comparisons are **paired by sample ID**. Question difficulty varies enormously (HotpotQA "easy" vs "hard"), and pairing removes that variance — an unpaired test on the same data can be 5-10x less powerful.
+Example:
+
+```text
+answer_correctness: oracle=0.784 vs bm25_k3=0.512 | diff=+0.272
+95% CI [+0.227, +0.317] | p_boot=0.0001 | p_perm=0.0001 | SIGNIFICANT
+```
+
+Comparisons are paired by sample ID, which controls for question-level difficulty instead of treating two runs as unrelated samples.
 
 ## CLI
 
 ```bash
-ragval runs                          # list saved benchmark runs
-ragval report bm25_k3                # means + 95% bootstrap CIs
-ragval compare oracle bm25_k3        # paired significance tests
+ragval runs
+ragval report bm25_k3
+ragval compare oracle bm25_k3
 ragval calibrate cal.jsonl --metric faithfulness --judge groq
 ```
 
-## Dashboard
+## What is implemented
 
-A full-stack web app (FastAPI + React) for exploring the results lives in
-[`dashboard/`](dashboard/). It serves the same statistical engine over a REST
-API and visualizes confidence intervals, paired significance tests, per-sample
-judge reasoning, and judge calibration.
+- [x] Core evaluation data types
+- [x] Claude, Gemini, Groq, and mock judge abstraction
+- [x] Judge-call disk caching, rate limiting, and retry
+- [x] Faithfulness, answer relevance, and answer correctness
+- [x] Judge-based context precision and recall
+- [x] Deterministic retrieval precision and recall
+- [x] Bootstrap confidence intervals
+- [x] Paired bootstrap and permutation tests
+- [x] Judge calibration against human labels
+- [x] JSONL run persistence
+- [x] CLI reporting and comparison
+- [x] Streamlit local dashboard
+- [x] FastAPI + React dashboard
+- [x] HotpotQA-500 benchmark across eight configurations
+- [x] Resumable benchmark execution and quota estimation
 
-![dashboard overview](dashboard/docs/overview.png)
+## HotpotQA-500 benchmark
+
+The published benchmark evaluates **8 RAG configurations on the same 500-question HotpotQA sample**, varying retrieval quality and prompting strategy.
+
+| Config | Retrieval | Prompt |
+| --- | --- | --- |
+| `closed_book` | none | concise |
+| `bm25_k1` | BM25 top-1 | concise |
+| `bm25_k3` | BM25 top-3 | concise |
+| `bm25_k5` | BM25 top-5 | concise |
+| `full_context` | all 10 paragraphs | concise |
+| `oracle` | gold supporting paragraphs | concise |
+| `bm25_k3_cot` | BM25 top-3 | chain-of-thought |
+| `oracle_cot` | gold supporting paragraphs | chain-of-thought |
+
+Generator: `llama-3.1-8b-instant`  
+Judge: `claude-haiku-4-5`  
+Sample size: `n=500`
+
+### Results
+
+| Config | Answer correctness | Faithfulness | Retrieval precision | Retrieval recall |
+| --- | ---: | ---: | ---: | ---: |
+| `closed_book` | 0.344 [0.30-0.38] | 0.262 [0.22-0.30] | 0.000 | 0.000 |
+| `bm25_k1` | 0.278 [0.24-0.32] | 0.859 [0.83-0.88] | 0.800 [0.77-0.83] | 0.400 [0.38-0.42] |
+| `bm25_k3` | 0.512 [0.47-0.56] | 0.866 [0.84-0.89] | 0.459 [0.44-0.48] | 0.687 [0.66-0.71] |
+| `bm25_k5` | 0.587 [0.54-0.63] | 0.878 [0.85-0.90] | 0.318 [0.31-0.33] | 0.791 [0.77-0.81] |
+| `full_context` | 0.724 [0.69-0.76] | 0.891 [0.87-0.92] | 0.202 [0.20-0.21] | 1.000 |
+| `oracle` | 0.784 [0.75-0.82] | 0.909 [0.89-0.93] | 1.000 | 1.000 |
+| `bm25_k3_cot` | 0.626 [0.58-0.67] | 0.714 [0.68-0.75] | 0.459 [0.44-0.48] | 0.687 [0.66-0.71] |
+| `oracle_cot` | 0.868 [0.84-0.90] | 0.895 [0.87-0.92] | 1.000 | 1.000 |
+
+### Main findings
+
+- **Retrieval quality strongly tracks answer correctness.** Correctness rises from 0.278 (`bm25_k1`) to 0.512 (`bm25_k3`), 0.587 (`bm25_k5`), and 0.784 (`oracle`) as retrieval recall improves.
+- **Poor retrieval can be worse than no retrieval.** `closed_book` scores 0.344 correctness versus 0.278 for `bm25_k1`, showing that a weak retrieved context can actively mislead generation.
+- **Perfect retrieval does not guarantee perfect answers.** `oracle` has retrieval precision/recall of 1.0 but answer correctness of 0.784, separating generation limitations from retrieval limitations.
+- **Chain-of-thought can trade faithfulness for correctness.** `bm25_k3_cot` improves correctness from 0.512 to 0.626 while faithfulness falls from 0.866 to 0.714.
+- **More context is not automatically better.** `full_context` reaches recall 1.0 but only 0.202 precision and still underperforms `oracle` on correctness.
+
+### Paired comparisons against `bm25_k3`
+
+| Config | Metric | Diff | 95% CI | p (boot) | p (perm) | Verdict |
+| --- | --- | ---: | --- | ---: | ---: | --- |
+| `closed_book` | answer correctness | -0.168 | [-0.220, -0.116] | 0.0001 | 0.0001 | significant |
+| `bm25_k1` | answer correctness | -0.234 | [-0.280, -0.189] | 0.0001 | 0.0001 | significant |
+| `bm25_k5` | answer correctness | +0.074 | [+0.041, +0.109] | 0.0001 | 0.0001 | significant |
+| `full_context` | answer correctness | +0.211 | [+0.166, +0.257] | 0.0001 | 0.0001 | significant |
+| `oracle` | answer correctness | +0.272 | [+0.227, +0.317] | 0.0001 | 0.0001 | significant |
+| `bm25_k3_cot` | answer correctness | +0.114 | [+0.074, +0.153] | 0.0001 | 0.0001 | significant |
+| `bm25_k3_cot` | faithfulness | -0.151 | [-0.194, -0.109] | 0.0001 | 0.0001 | significant |
+| `oracle_cot` | answer correctness | +0.355 | [+0.309, +0.400] | 0.0001 | 0.0001 | significant |
+
+Full per-metric comparisons are reproducible locally with:
 
 ```bash
-cd dashboard && ./dev.sh          # backend on :8000, frontend on :5173
+ragval compare <config> bm25_k3
 ```
 
-See [`dashboard/README.md`](dashboard/README.md) for architecture and deploy
-instructions.
+## Judge calibration
 
-There is also a lightweight Streamlit view for quick local inspection:
+The benchmark faithfulness judge was checked against 20 human-labeled examples scored before seeing judge output.
 
-```bash
-pip install -e ".[dashboard]"
-streamlit run src/ragval/dashboard.py
-```
+| Judge | Within-1 agreement | Quadratic-weighted κ | Spearman | Mean bias |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5` | 0.70 | 0.458 | 0.528 | -0.40 |
+| `llama-3.3-70b` | 0.75 | 0.665 | 0.621 | -0.05 |
 
-## The HotpotQA-500 benchmark
+The calibration results show why absolute LLM-judge scores should not be treated as ground truth. In this sample, both judges are somewhat harsh on faithfulness, while rank correlation remains moderate. ragval exposes that uncertainty instead of hiding it behind a single score.
 
-8 RAG configurations over one axis of retrieval quality and one of prompting, on a 500-question sample of HotpotQA (distractor setting):
-
-| config | retrieval | prompt |
-|---|---|---|
-| closed_book | none | concise |
-| bm25_k1 | BM25 top-1 | concise |
-| bm25_k3 | BM25 top-3 | concise |
-| bm25_k5 | BM25 top-5 | concise |
-| full_context | all 10 paragraphs | concise |
-| oracle | gold supporting paragraphs | concise |
-| bm25_k3_cot | BM25 top-3 | chain-of-thought |
-| oracle_cot | gold supporting paragraphs | chain-of-thought |
-
-The grid answers four questions with p-values instead of vibes: does retrieval depth matter (k1/k3/k5), how far is BM25 from the ceiling (vs oracle), does the model already know the answers (closed_book — HotpotQA is Wikipedia-based), and does CoT help and interact with retrieval quality.
+## Reproduce the benchmark
 
 ```bash
-# dataset is committed at benchmarks/hotpotqa-500.jsonl; to regenerate:
+# regenerate the dataset sample
 python scripts/prepare_hotpotqa.py
 
-# 1. What are my provider's actual limits?
+# inspect provider quota
 python scripts/check_quota.py
 
-# 2. What will this run cost? (no API calls)
+# estimate token usage/cost without making model calls
 python scripts/run_benchmark.py --estimate-only
 
-# 3. Run it. Generation on free Groq, judging on Claude.
+# run; partial progress is checkpointed and resumes automatically
 python scripts/run_benchmark.py --judge claude --rpm 24 --yes
 ```
 
-The benchmark **resumes by default** — every completed sample is checkpointed to `benchmarks/results/partial/`, and judge calls are disk-cached, so interruptions cost nothing. On a free tier the binding constraint is usually *tokens per day*, not requests per minute; `run_benchmark.py` detects daily-quota exhaustion, checkpoints, and exits cleanly so you can resume the next day.
+Completed samples are checkpointed and judge calls are cached, so quota interruptions do not require restarting the full experiment.
 
-The answer **generator** runs on a high-quota cheap model (`llama-3.1-8b-instant`) while the **judge** runs on a stronger model from a different family (`claude-haiku-4-5`). Splitting families removes the self-preference bias a same-family judge can have, and a weaker generator is defensible here — arguably preferable, since it leans on retrieval rather than memorization, which is what the benchmark measures.
+## Repository layout
 
-### Sample size
+```text
+ragval/
+├── src/ragval/          # evaluation engine, judges, metrics, stats, CLI
+├── tests/               # automated test suite
+├── benchmarks/          # HotpotQA dataset, configs, and saved results
+├── scripts/             # benchmark preparation and execution
+├── dashboard/           # FastAPI + React dashboard
+├── docs/                # architecture documentation
+├── pyproject.toml       # package metadata and tooling configuration
+└── .github/             # CI workflows
+```
 
-A power analysis, run through ragval's own paired bootstrap:
+## Design principles
 
-| n | power to detect d=0.10 | d=0.15 |
-|---|---|---|
-| 100 | 0.67 | 0.94 |
-| 150 | 0.81 | 0.98 |
-| 500 | 0.99 | 1.00 |
-
-n=150 already clears the conventional 0.80 threshold for a 10-point difference; the full run below uses n=500, which resolves gaps down to ~5 points.
-
-## Design
-
-A RAG system in ragval is just a callable: `(question: str) -> RagOutput`. No framework lock-in.
-
-Metrics come in two flavors, deliberately:
-
-- **Judge-based** (faithfulness, answer relevance, answer correctness, context precision/recall) — flexible, works on any dataset, but must be calibrated.
-- **Deterministic** (retrieval recall/precision against gold supporting docs) — free, exact, reproducible. Use them to sanity-check the judge: if judge-based context recall disagrees wildly with deterministic retrieval recall, the judge is the problem.
-
-## Results — HotpotQA-500
-
-Generator: `llama-3.1-8b-instant`. Judge: `claude-haiku-4-5`. Every cell is mean [95% bootstrap CI], n=500.
-
-| config | answer_correctness | faithfulness | retrieval_precision | retrieval_recall |
-|---|---|---|---|---|
-| closed_book | 0.344 [0.30-0.38] | 0.262 [0.22-0.30] | 0.000 | 0.000 |
-| bm25_k1 | 0.278 [0.24-0.32] | 0.859 [0.83-0.88] | 0.800 [0.77-0.83] | 0.400 [0.38-0.42] |
-| bm25_k3 | 0.512 [0.47-0.56] | 0.866 [0.84-0.89] | 0.459 [0.44-0.48] | 0.687 [0.66-0.71] |
-| bm25_k5 | 0.587 [0.54-0.63] | 0.878 [0.85-0.90] | 0.318 [0.31-0.33] | 0.791 [0.77-0.81] |
-| full_context | 0.724 [0.69-0.76] | 0.891 [0.87-0.92] | 0.202 [0.20-0.21] | 1.000 |
-| oracle | 0.784 [0.75-0.82] | 0.909 [0.89-0.93] | 1.000 | 1.000 |
-| bm25_k3_cot | 0.626 [0.58-0.67] | 0.714 [0.68-0.75] | 0.459 [0.44-0.48] | 0.687 [0.66-0.71] |
-| oracle_cot | 0.868 [0.84-0.90] | 0.895 [0.87-0.92] | 1.000 | 1.000 |
-
-### What the benchmark shows
-
-All differences below are vs `bm25_k3`, paired bootstrap, n=500. Every claim is significant at p < 0.001 unless stated.
-
-- **Retrieval quality drives correctness, monotonically.** answer_correctness climbs 0.28 -> 0.51 -> 0.59 -> 0.78 across bm25_k1 -> k3 -> k5 -> oracle as retrieval_recall rises 0.40 -> 0.69 -> 0.79 -> 1.00. Every step is significant.
-- **Bad retrieval is worse than none.** `closed_book` (0.344) *beats* `bm25_k1` (0.278) on correctness — a single mis-retrieved document actively misleads the generator, where no context at least lets it fall back on parametric knowledge.
-- **Perfect retrieval isn't perfect answers.** Even `oracle`, with gold documents and precision/recall = 1.0, caps at 0.784 correctness. The ~22-point gap is the 8B generator's own ceiling, not a retrieval failure.
-- **Chain-of-thought recovers part of that ceiling — at a cost.** `oracle_cot` lifts correctness to 0.868 (+0.084 over `oracle`) with identical retrieval. But CoT *lowers* faithfulness: `bm25_k3_cot` faithfulness is 0.714 vs `bm25_k3`'s 0.866 (-0.151, significant). Reasoning makes answers more correct yet less strictly grounded in the retrieved text.
-- **More context is not better.** `full_context` (all 10 paragraphs, precision 0.20) scores 0.724 — below `oracle`'s 0.784 despite identical recall. Noise dilutes even when the answer is present.
-
-### Compared against `bm25_k3` (paired, per-sample)
-
-| config | metric | diff | 95% CI | p (boot) | p (perm) | verdict |
-|---|---|---|---|---|---|---|
-| closed_book | answer_correctness | -0.168 | [-0.220, -0.116] | 0.0001 | 0.0001 | **significant** |
-| closed_book | faithfulness | -0.604 | [-0.649, -0.556] | 0.0001 | 0.0001 | **significant** |
-| bm25_k1 | answer_correctness | -0.234 | [-0.280, -0.189] | 0.0001 | 0.0001 | **significant** |
-| bm25_k1 | faithfulness | -0.007 | [-0.040, +0.027] | 0.6882 | 0.7106 | not significant |
-| bm25_k5 | answer_correctness | +0.074 | [+0.041, +0.109] | 0.0001 | 0.0001 | **significant** |
-| bm25_k5 | retrieval_recall | +0.104 | [+0.086, +0.122] | 0.0001 | 0.0001 | **significant** |
-| full_context | answer_correctness | +0.211 | [+0.166, +0.257] | 0.0001 | 0.0001 | **significant** |
-| full_context | retrieval_precision | -0.256 | [-0.273, -0.240] | 0.0001 | 0.0001 | **significant** |
-| oracle | answer_correctness | +0.272 | [+0.227, +0.317] | 0.0001 | 0.0001 | **significant** |
-| oracle | faithfulness | +0.044 | [+0.014, +0.076] | 0.0063 | 0.0090 | **significant** |
-| bm25_k3_cot | answer_correctness | +0.114 | [+0.074, +0.153] | 0.0001 | 0.0001 | **significant** |
-| bm25_k3_cot | faithfulness | -0.151 | [-0.194, -0.109] | 0.0001 | 0.0001 | **significant** |
-| oracle_cot | answer_correctness | +0.355 | [+0.309, +0.400] | 0.0001 | 0.0001 | **significant** |
-| oracle_cot | faithfulness | +0.029 | [-0.004, +0.064] | 0.0961 | 0.1045 | not significant |
-
-Full per-metric comparisons (including retrieval precision/recall for every config) are reproducible with `ragval compare <config> bm25_k3`.
-
-### Judge calibration
-
-The faithfulness judge was validated against 20 human-labeled examples (scored blind, before seeing any judge output):
-
-| judge | within-1 agreement | quadratic-weighted κ | Spearman | mean bias |
-|---|---|---|---|---|
-| claude-haiku-4-5 (benchmark judge) | 0.70 | 0.458 | 0.528 | −0.40 |
-| llama-3.3-70b (cross-check) | 0.75 | 0.665 | 0.621 | −0.05 |
-
-Two judges from different model families agree with human labels moderately (κ ≈ 0.5–0.67) and with each other at κ = 0.52. **Both run harsh on faithfulness** — Claude notably so (−0.40), meaning the absolute faithfulness scores above are likely *conservative*. Ranking between configs is preserved (Spearman ≈ 0.5–0.6), so the paired comparisons hold; absolute faithfulness values should be read as a lower bound. This is exactly the caveat ragval is built to surface — an uncalibrated judge would report these numbers with false confidence.
+1. **Compare distributions, not just means.** A benchmark score without uncertainty can be misleading.
+2. **Preserve per-sample results.** Paired analysis is only possible when individual examples remain aligned across configurations.
+3. **Calibrate judges.** LLM-as-judge is useful, but it is still a measurement instrument with bias.
+4. **Keep the evaluated RAG framework-independent.** The evaluation layer should not force an application to adopt a specific orchestration framework.
+5. **Make experiments resumable and reproducible.** Evaluation is often constrained by provider quotas, latency, and cost.
 
 ## License
 
