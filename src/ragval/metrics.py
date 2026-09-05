@@ -1,11 +1,18 @@
-"""Metric implementations.
+"""Evaluation metrics for RAG outputs.
 
-Each metric is a callable that takes (EvalSample, RagOutput, Judge) and returns
-a MetricResult. Metrics use explicit rubrics in their judge prompts and return
-JSON, which we parse defensively.
+Metrics share a small interface: each receives an ``EvalSample``, the system's
+``RagOutput``, and a ``Judge`` and returns a ``MetricResult``.
 
-Week 1: faithfulness, answer_relevance.
-Week 2: context_precision, context_recall.
+The module deliberately mixes two kinds of measurements:
+
+- judge-based metrics for faithfulness, answer relevance/correctness, and
+  context precision/recall; these preserve raw scores and reasoning so the
+  judge can be calibrated against human labels;
+- deterministic retrieval precision/recall for datasets with gold supporting
+  documents, providing an exact judge-free check on retrieval quality.
+
+Judge prompts use explicit rubrics and structured JSON responses, which are
+parsed defensively rather than assumed to be well formed.
 """
 
 from __future__ import annotations
