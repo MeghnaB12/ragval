@@ -2,9 +2,7 @@
 
 A thin REST layer over ragval's existing engine. Every endpoint reads the
 committed benchmark runs in `benchmarks/results/` and calls the same
-`ragval.stats` functions the CLI uses — so the API can never disagree with
-`ragval compare`. No numbers are computed here; they are all delegated to the
-statistics library, which is the point: the rigor lives in one place.
+`ragval.stats` functions the CLI uses — keeping statistical logic in one place.
 
 Run locally:
     uvicorn main:app --reload --port 8000
@@ -38,8 +36,8 @@ from ragval.types import RunResult  # noqa: E402
 
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 
-# The benchmark ran these 8 configs. A stray early Gemini smoke run also lives
-# in the results dir; exclude it so the dashboard shows only the real n=500 grid.
+# The published benchmark ran these 8 configs. A stray early smoke run also lives
+# in the results dir; exclude it so the dashboard shows only the n=500 benchmark grid.
 BENCHMARK_CONFIGS = [
     "closed_book",
     "bm25_k1",
@@ -57,18 +55,14 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# In dev the React app runs on a different port; allow it. Tighten in prod.
+# In development the React app runs on a different port. Production origin
+# hardening is tracked separately from this documentation-focused pass.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET"],
     allow_headers=["*"],
 )
-
-
-# ---------------------------------------------------------------------------
-# Response models — an explicit API contract, auto-documented at /docs.
-# ---------------------------------------------------------------------------
 
 
 class RunSummary(BaseModel):
@@ -139,22 +133,12 @@ class CalibrationReport(BaseModel):
     note: str
 
 
-# ---------------------------------------------------------------------------
-# Data loading — cached so repeated requests don't re-read 500-line JSONL files.
-# ---------------------------------------------------------------------------
-
-
 @lru_cache(maxsize=32)
 def _load(config: str) -> RunResult:
     matches = sorted(RESULTS_DIR.glob(f"{config}-hotpotqa*.jsonl"))
     if not matches:
         raise HTTPException(status_code=404, detail=f"No run found for config '{config}'")
     return load_run(matches[-1])
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
 
 
 @app.get("/api/health")
@@ -243,11 +227,7 @@ def get_samples(
     order: str = Query("worst", pattern="^(worst|best)$"),
     limit: int = Query(50, ge=1, le=500),
 ) -> list[SampleRow]:
-    """Per-sample scores with the judge's reasoning, worst-scoring first.
-
-    This is the view a static results table can't give you: *why* did a config
-    fail on a given question? The judge's own words are the answer.
-    """
+    """Per-sample scores with the stored judge reasoning."""
     run = _load(config)
     rows: list[SampleRow] = []
     for s in run.samples:
@@ -270,12 +250,11 @@ def get_samples(
 
 @app.get("/api/calibration", response_model=CalibrationReport)
 def get_calibration() -> CalibrationReport:
-    """Judge-vs-human calibration for faithfulness.
+    """Published judge-vs-human calibration summary for faithfulness.
 
-    These numbers come from `scripts/cross_judge.py` run on 20 human-labeled
-    examples. They are served as published constants rather than recomputed on
-    every request (recomputing would require live API keys). See
-    benchmarks/calibration/faithfulness.jsonl for the labels.
+    These values come from the saved 20-example human-labeled calibration set.
+    They are served as published constants rather than recomputed on each HTTP
+    request because recomputation requires live provider credentials.
     """
     return CalibrationReport(
         metric="faithfulness",
@@ -299,9 +278,9 @@ def get_calibration() -> CalibrationReport:
             ),
         ],
         note=(
-            "Both judges run harsh on faithfulness (negative bias), so the "
-            "absolute faithfulness scores are a conservative lower bound. "
-            "Config rankings are preserved (Spearman ~0.5-0.6), so the paired "
-            "comparisons hold."
+            "Both judges scored this small calibration sample somewhat more harshly "
+            "than the human labels. Rank agreement is moderate, which supports using "
+            "the calibration as a diagnostic for relative comparisons, but it does not "
+            "make the absolute judge scores ground truth or validate every comparison."
         ),
     )
