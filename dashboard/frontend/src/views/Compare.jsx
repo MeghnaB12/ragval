@@ -28,8 +28,8 @@ export function Compare({ runs, initialA }) {
       <p className="page-lede">
         Is the gap between two configs real, or noise? Each metric is compared
         sample-by-sample (paired by question ID), then run through a bootstrap and a
-        sign-flip permutation test. The whisker shows the difference and its 95% CI;
-        if the interval clears zero, the difference is significant.
+        sign-flip permutation test. The whisker shows the estimated difference and its
+        95% confidence interval; the verdict uses the paired bootstrap p-value.
       </p>
 
       <div className="controls">
@@ -92,9 +92,10 @@ export function Compare({ runs, initialA }) {
       )}
 
       <p className="footer-note">
-        A "significant" verdict means the 95% CI on the paired difference excludes zero
-        (p &lt; 0.05, bootstrap). Pairing removes question-difficulty variance, which
-        makes the test far more sensitive than comparing the two means in isolation.
+        A "significant" verdict means the paired bootstrap test has p &lt; 0.05.
+        The confidence interval and independent sign-flip permutation p-value are
+        shown alongside as complementary uncertainty checks. Pairing controls for
+        question-level difficulty that is shared across both configurations.
       </p>
     </>
   );

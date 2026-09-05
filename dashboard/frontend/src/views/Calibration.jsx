@@ -14,10 +14,10 @@ export function Calibration() {
       <div className="page-eyebrow">judge vs human · n={data.n_labels}</div>
       <h1 className="page-title">Judge calibration</h1>
       <p className="page-lede">
-        Every score above is assigned by an LLM. Can it be trusted? These are the
-        judge's agreement statistics against {data.n_labels} human-labeled examples,
-        scored blind. Two judges from different model families are checked — Claude
-        (the benchmark judge) and Llama (an independent cross-check).
+        Every judge-based score above is assigned by an LLM. How closely does that
+        measurement agree with a human-labeled sample? These statistics compare two
+        judges from different model families against {data.n_labels} blind human labels:
+        Claude (the published benchmark judge) and Llama (an independent cross-check).
       </p>
 
       <div className="panel">
@@ -57,10 +57,10 @@ export function Calibration() {
       </div>
 
       <p className="footer-note">
-        Negative bias means the judge scores lower than humans. Because both judges
-        run harsh, the absolute faithfulness numbers are a conservative lower bound —
-        but rankings between configs hold, so the comparisons remain valid. Surfacing
-        this instead of hiding it is the point of the framework.
+        Negative bias means a judge scored this calibration sample lower than the human
+        labels on average. With only {data.n_labels} labels, these results are a diagnostic,
+        not proof that every benchmark judgment is correct. They make judge uncertainty
+        visible and help distinguish relative comparisons from absolute score claims.
       </p>
     </>
   );
