@@ -1,49 +1,20 @@
-"""Statistical layer.
-
-This is the reason ragval exists. Most eval tools report "config A: 0.74,
-config B: 0.71" and stop. ragval answers the question that actually matters:
-*is that difference real, or is it noise?*
-
-Three tools:
-
-1. `bootstrap_ci` — a 95% (by default) percentile bootstrap confidence
-   interval around a metric mean. Nonparametric: no normality assumption,
-   which matters because per-sample metric scores are bounded in [0, 1]
-   and often heavily skewed toward the endpoints.
-
-2. `paired_bootstrap_test` — a paired bootstrap test on the *per-sample
-   score differences* between two runs on the same dataset. Pairing is
-   essential: question difficulty varies enormously (HotpotQA "easy" vs
-   "hard" bridge questions), and pairing removes that variance from the
-   comparison. An unpaired test on the same data can easily be 5-10x less
-   powerful.
-
-3. `permutation_test` — a paired sign-flip permutation test as a second
-   opinion. Under H0 (no difference), the sign of each per-sample
-   difference is arbitrary, so we flip signs at random and see how often
-   the shuffled mean difference is at least as extreme as the observed one.
-
-All functions are seeded and deterministic by default (seed=42) so results
-are reproducible, in keeping with the framework's reproducibility principle.
-"""
+"""Statistical summaries and paired comparisons for evaluation runs."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
 from ragval.types import RunResult
 
-DEFAULT_N_RESAMPLES = 10_000
 DEFAULT_CONFIDENCE = 0.95
+DEFAULT_N_RESAMPLES = 10_000
 DEFAULT_SEED = 42
 
 
 @dataclass
 class MetricSummary:
-    """Mean + bootstrap CI for one metric in one run."""
-
     metric_name: str
     n: int
     mean: float
@@ -52,46 +23,19 @@ class MetricSummary:
     confidence: float
     std: float
 
-    def __str__(self) -> str:
-        pct = int(self.confidence * 100)
-        return (
-            f"{self.metric_name}: {self.mean:.3f} "
-            f"[{pct}% CI {self.ci_low:.3f}–{self.ci_high:.3f}] (n={self.n})"
-        )
-
 
 @dataclass
-class ComparisonResult:
-    """Result of comparing one metric between two runs on the same dataset."""
-
+class RunComparison:
     metric_name: str
-    config_a: str
-    config_b: str
     n: int
     mean_a: float
     mean_b: float
-    mean_diff: float  # mean(a - b)
+    mean_diff: float
     diff_ci_low: float
     diff_ci_high: float
     p_value_bootstrap: float
     p_value_permutation: float
-    confidence: float
-    significant: bool = field(init=False)
-
-    def __post_init__(self) -> None:
-        alpha = 1.0 - self.confidence
-        self.significant = self.p_value_bootstrap < alpha
-
-    def __str__(self) -> str:
-        verdict = "SIGNIFICANT" if self.significant else "not significant"
-        pct = int(self.confidence * 100)
-        return (
-            f"{self.metric_name}: {self.config_a}={self.mean_a:.3f} vs "
-            f"{self.config_b}={self.mean_b:.3f} | diff={self.mean_diff:+.3f} "
-            f"[{pct}% CI {self.diff_ci_low:+.3f}–{self.diff_ci_high:+.3f}] "
-            f"p_boot={self.p_value_bootstrap:.4f} p_perm={self.p_value_permutation:.4f} "
-            f"→ {verdict}"
-        )
+    significant: bool
 
 
 def bootstrap_ci(
@@ -114,8 +58,10 @@ def bootstrap_ci(
     idx = rng.integers(0, arr.size, size=(n_resamples, arr.size))
     boot_means = arr[idx].mean(axis=1)
     alpha = 1.0 - confidence
-    lo, hi = np.quantile(boot_means, [alpha / 2, 1 - alpha / 2])
-    return float(arr.mean()), float(lo), float(hi)
+    bounds = np.asarray(np.quantile(boot_means, [alpha / 2, 1 - alpha / 2]), dtype=float)
+    lo = float(bounds[0])
+    hi = float(bounds[1])
+    return float(arr.mean()), lo, hi
 
 
 def summarize_metric(
@@ -199,14 +145,16 @@ def paired_bootstrap_test(
     boot_means = diffs[idx].mean(axis=1)
 
     alpha = 1.0 - confidence
-    lo, hi = np.quantile(boot_means, [alpha / 2, 1 - alpha / 2])
+    bounds = np.asarray(np.quantile(boot_means, [alpha / 2, 1 - alpha / 2]), dtype=float)
+    lo = float(bounds[0])
+    hi = float(bounds[1])
 
     # Shift to null: center bootstrap distribution at 0
     null_dist = boot_means - observed
     p = float((np.abs(null_dist) >= abs(observed)).mean())
     # Avoid reporting p=0 from a finite resample count
     p = max(p, 1.0 / n_resamples)
-    return observed, float(lo), float(hi), p
+    return observed, lo, hi, p
 
 
 def permutation_test(
@@ -222,7 +170,7 @@ def permutation_test(
         raise ValueError("paired arrays must have equal length")
     diffs = a_arr - b_arr
     observed = abs(float(diffs.mean()))
-    if np.allclose(diffs, 0):
+    if observed == 0:
         return 1.0
 
     rng = np.random.default_rng(seed)
@@ -239,32 +187,44 @@ def compare_runs(
     confidence: float = DEFAULT_CONFIDENCE,
     n_resamples: int = DEFAULT_N_RESAMPLES,
     seed: int = DEFAULT_SEED,
-) -> ComparisonResult:
-    """Compare one metric between two runs with paired tests.
-
-    Alignment is by sample_id, so both runs must have been evaluated on
-    (at least partially) the same dataset.
-    """
+) -> RunComparison:
+    """Paired comparison of one metric between two runs."""
     a, b = _paired_scores(run_a, run_b, metric_name)
-    mean_diff, lo, hi, p_boot = paired_bootstrap_test(a, b, confidence, n_resamples, seed)
-    p_perm = permutation_test(a, b, n_resamples, seed)
-    return ComparisonResult(
+    diff, lo, hi, p_boot = paired_bootstrap_test(
+        a, b, confidence=confidence, n_resamples=n_resamples, seed=seed
+    )
+    p_perm = permutation_test(a, b, n_resamples=n_resamples, seed=seed)
+    return RunComparison(
         metric_name=metric_name,
-        config_a=run_a.config_name,
-        config_b=run_b.config_name,
-        n=int(a.size),
+        n=len(a),
         mean_a=float(a.mean()),
         mean_b=float(b.mean()),
-        mean_diff=mean_diff,
+        mean_diff=diff,
         diff_ci_low=lo,
         diff_ci_high=hi,
         p_value_bootstrap=p_boot,
         p_value_permutation=p_perm,
-        confidence=confidence,
+        significant=p_boot < (1 - confidence),
     )
 
 
-def compare_all_metrics(run_a: RunResult, run_b: RunResult, **kw) -> list[ComparisonResult]:
-    """Compare every metric shared by both runs."""
-    shared = sorted(set(run_a.metric_names()) & set(run_b.metric_names()))
-    return [compare_runs(run_a, run_b, m, **kw) for m in shared]
+def compare_all_metrics(
+    run_a: RunResult,
+    run_b: RunResult,
+    confidence: float = DEFAULT_CONFIDENCE,
+    n_resamples: int = DEFAULT_N_RESAMPLES,
+    seed: int = DEFAULT_SEED,
+) -> list[RunComparison]:
+    """Compare every metric shared by two runs."""
+    common = sorted(set(run_a.metric_names()) & set(run_b.metric_names()))
+    return [
+        compare_runs(
+            run_a,
+            run_b,
+            metric,
+            confidence=confidence,
+            n_resamples=n_resamples,
+            seed=seed,
+        )
+        for metric in common
+    ]
