@@ -70,6 +70,27 @@ cd dashboard
 # React:   http://localhost:5173
 ```
 
+## Production engineering
+
+The repository is validated as a full-stack application rather than only as an evaluation library:
+
+- **Containerized runtime** — a non-root FastAPI image and multi-stage React → Nginx image are wired together with Docker Compose and health checks.
+- **API contract coverage** — FastAPI tests cover health, run discovery, comparisons, sample retrieval/validation, calibration, and error paths.
+- **Cross-version Python CI** — Python 3.10, 3.11, and 3.12 run linting, formatting, tests, and a coverage floor; type checking is anchored to the minimum supported Python version.
+- **Frontend CI** — deterministic `npm ci`, linting, and a production React build are required on pull requests.
+- **Container CI** — Compose configuration and both production images are built in CI.
+- **Package validation** — the Python distribution is built from `pyproject.toml`, installed from the generated wheel, and smoke-tested through the `ragval` CLI.
+- **Release readiness** — `v*` tags build and validate wheel/sdist artifacts and create a GitHub Release with generated notes.
+- **Production configuration** — dashboard CORS origins are environment-driven rather than hard-coded to a wildcard.
+
+Run the production-like stack locally:
+
+```bash
+docker compose up --build
+# React/Nginx: http://localhost:8080
+# FastAPI:     http://localhost:8000
+```
+
 ## Quick start
 
 ### Install for development
@@ -278,7 +299,7 @@ ragval/
 ├── dashboard/           # FastAPI + React dashboard
 ├── docs/                # architecture documentation
 ├── pyproject.toml       # package metadata and tooling configuration
-└── .github/             # CI workflows
+└── .github/             # CI and release workflows
 ```
 
 ## Design principles
