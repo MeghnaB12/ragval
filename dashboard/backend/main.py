@@ -5,7 +5,7 @@ committed benchmark runs in `benchmarks/results/` and calls the same
 `ragval.stats` functions the CLI uses — keeping statistical logic in one place.
 
 Run locally:
-    uvicorn main:app --reload --port 8000
+    uvicorn dashboard.backend.main:app --reload --port 8000
 
 Endpoints:
     GET /api/health
@@ -18,6 +18,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -26,7 +27,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# Make the ragval package importable when running from dashboard/backend.
+# Make the ragval package importable when running directly from the repository.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
@@ -36,8 +37,6 @@ from ragval.types import RunResult  # noqa: E402
 
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
 
-# The published benchmark ran these 8 configs. A stray early smoke run also lives
-# in the results dir; exclude it so the dashboard shows only the n=500 benchmark grid.
 BENCHMARK_CONFIGS = [
     "closed_book",
     "bm25_k1",
@@ -49,19 +48,30 @@ BENCHMARK_CONFIGS = [
     "oracle_cot",
 ]
 
+
+def _cors_origins() -> list[str]:
+    """Allowed browser origins from a comma-separated environment variable.
+
+    Local development works without configuration. Production deployments should
+    set RAGVAL_CORS_ORIGINS explicitly, for example:
+    https://ragval.vercel.app,https://www.example.com
+    """
+    raw = os.getenv("RAGVAL_CORS_ORIGINS", "http://localhost:5173")
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
 app = FastAPI(
     title="ragval dashboard API",
     description="REST layer over ragval's statistical engine.",
     version="1.0.0",
 )
 
-# In development the React app runs on a different port. Production origin
-# hardening is tracked separately from this documentation-focused pass.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
     allow_methods=["GET"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type"],
+    allow_credentials=False,
 )
 
 
@@ -250,12 +260,7 @@ def get_samples(
 
 @app.get("/api/calibration", response_model=CalibrationReport)
 def get_calibration() -> CalibrationReport:
-    """Published judge-vs-human calibration summary for faithfulness.
-
-    These values come from the saved 20-example human-labeled calibration set.
-    They are served as published constants rather than recomputed on each HTTP
-    request because recomputation requires live provider credentials.
-    """
+    """Published judge-vs-human calibration summary for faithfulness."""
     return CalibrationReport(
         metric="faithfulness",
         n_labels=20,
