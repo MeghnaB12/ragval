@@ -36,7 +36,7 @@ jobs:
         if: matrix.python-version == '3.12'
         run: |
           python -m build
-          python -m pip install --force-reinstall dist/*.whl
+          python -m pip install --no-deps --force-reinstall dist/*.whl
           ragval --help
 
   frontend:
